@@ -1,0 +1,3 @@
+[submodule "DuckCount-Algorithm"]
+	path = DuckCount-Algorithm
+	url = ../DuckCount-Algorithm.git

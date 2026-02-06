@@ -1,0 +1,6 @@
+[workspace]
+members = ["duckcount-algorithm", "uniffi-bindgen", "uniffi-bindgen-swift"]
+resolver = "2"
+
+[workspace.dependencies]
+uniffi = "0.29.3" # MPL-2.0
