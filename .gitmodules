@@ -1,7 +1,0 @@
-[submodule "DuckCount-Algorithm"]
-	path = DuckCount-Algorithm
-	url = ../DuckCount-Algorithm.git
-
-[submodule "DuckCount-Cryptography"]
-	path = DuckCount-Cryptography
-	url = ../DuckCount-Cryptography.git
