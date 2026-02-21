@@ -9,18 +9,19 @@ mod tests {
     #[test]
     fn test_group_new() {
         let group = Group::new();
-        assert!(group.users_id.lock().unwrap().is_empty());
-        assert!(group.expenses.lock().unwrap().is_empty());
+        assert!(group.users_id.is_empty());
+        assert!(group.expenses.is_empty());
     }
 
     #[test]
     fn test_add_user() {
         let group = Group::new();
         let user_id = Uuid::new_v4().to_string();
-        group.add_user(&user_id);
 
-        assert_eq!(group.users_id.lock().unwrap().len(), 1);
-        assert_eq!(group.users_id.lock().unwrap()[0], user_id);
+        let group = group.with_added_user(&user_id);
+
+        assert_eq!(group.users_id.len(), 1);
+        assert_eq!(group.users_id[0], user_id);
     }
 
     #[test]
@@ -34,9 +35,9 @@ mod tests {
         )];
         let expense = Expense::new(&creditor_id, amount, beneficiaries).unwrap();
 
-        group.add_expense(&expense);
+        let group = group.with_added_expense(&expense);
 
-        assert_eq!(group.expenses.lock().unwrap().len(), 1);
+        assert_eq!(group.expenses.len(), 1);
     }
 
     #[test]
@@ -46,9 +47,9 @@ mod tests {
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();
 
-        group.add_user(&alice_id);
-        group.add_user(&bob_id);
-        group.add_user(&charlie_id);
+        let group = group.with_added_user(&alice_id);
+        let group = group.with_added_user(&bob_id);
+        let group = group.with_added_user(&charlie_id);
 
         let beneficiaries = vec![
             Beneficiary::new(&bob_id, Some(String::from("50.00"))),
@@ -56,7 +57,7 @@ mod tests {
         ];
 
         let expense = Expense::new(&alice_id, "100.00", beneficiaries).unwrap();
-        group.add_expense(&expense);
+        let group = group.with_added_expense(&expense);
 
         let net_debts = group.calculate_net_debts_per_user().unwrap();
 
@@ -81,9 +82,9 @@ mod tests {
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();
 
-        group.add_user(&alice_id);
-        group.add_user(&bob_id);
-        group.add_user(&charlie_id);
+        let group = group.with_added_user(&alice_id);
+        let group = group.with_added_user(&bob_id);
+        let group = group.with_added_user(&charlie_id);
 
         let beneficiaries = vec![
             Beneficiary::new(&bob_id, Some(String::from("50.00"))),
@@ -91,7 +92,7 @@ mod tests {
         ];
 
         let expense = Expense::new(&alice_id, "100.00", beneficiaries).unwrap();
-        group.add_expense(&expense);
+        let group = group.with_added_expense(&expense);
 
         let transactions = group.calculate_transactions_to_equilibrate().unwrap();
 

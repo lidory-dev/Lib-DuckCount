@@ -43,7 +43,7 @@ pub enum ExpenseError {
 /// The [Expense] struct captures details about a financial expense, including the creditor's ID,
 /// the total amount of the expense, and how this amount is shared among beneficiaries. It also
 /// keeps track of the total share amount and the number of beneficiaries without a specified share.
-#[derive(Debug, uniffi::Object)]
+#[derive(Debug, Clone, uniffi::Object)]
 pub struct Expense {
     /// The ID of the creditor who made the expense.
     pub creditor_id: String,

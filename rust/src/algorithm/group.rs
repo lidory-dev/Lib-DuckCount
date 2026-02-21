@@ -2,7 +2,6 @@ use std::{
     collections::{BinaryHeap, HashMap},
     ops::Deref,
     str::FromStr,
-    sync::{Arc, Mutex},
 };
 use thiserror::Error;
 
@@ -23,12 +22,12 @@ pub enum GroupError {
 /// The [Group] struct is used to manage a collection of users and their associated expenses.
 /// It provides functionality to add users and expenses, calculate net debts per user,
 /// and determine the transactions needed to equilibrate debts among users.
-#[derive(Debug, uniffi::Object)]
+#[derive(Debug, Clone, uniffi::Object)]
 pub struct Group {
     /// A list of user IDs in the group.
-    pub users_id: Arc<Mutex<Vec<String>>>,
+    pub users_id: Vec<String>,
     /// A list of expenses associated with the group.
-    pub expenses: Arc<Mutex<Vec<Expense>>>,
+    pub expenses: Vec<Expense>,
 }
 
 #[uniffi::export]
@@ -47,16 +46,23 @@ impl Group {
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            users_id: Arc::new(Mutex::new(Vec::new())),
-            expenses: Arc::new(Mutex::new(Vec::new())),
+            users_id: Vec::new(),
+            expenses: Vec::new(),
         }
     }
 
-    /// Adds a user to the group.
+    /// Adds a user to the group and returns a new `Group` instance with the user added.
+    ///
+    /// This method creates a copy of the current group, appends the provided `user_id` to the list of users,
+    /// and returns the new group. The original group remains unchanged.
     ///
     /// # Arguments
     ///
-    /// * `user_id` - The ID of the user to add to the group.
+    /// * `user_id` - A string slice representing the unique identifier of the user to add.
+    ///
+    /// # Returns
+    ///
+    /// A new `Group` instance containing all existing users plus the newly added user.
     ///
     /// # Examples
     ///
@@ -67,20 +73,28 @@ impl Group {
     /// let mut group = Group::new();
     ///
     /// let user_id = Uuid::new_v4().to_string();
-    /// group.add_user(&user_id);
+    /// group.with_added_user(&user_id);
     /// ```
-    pub fn add_user(&self, user_id: &str) {
-        // TODO: REMOVE UNWRAP!
-        self.users_id.lock().unwrap().push(user_id.to_string());
+    pub fn with_added_user(&self, user_id: &str) -> Group {
+        let mut new_group = self.clone();
+
+        new_group.users_id.push(user_id.to_string());
+
+        new_group
     }
 
-    /// Adds an expense to the group.
+    /// Adds an expense to the group and returns a new `Group` instance with the expense included.
+    ///
+    /// This method creates a copy of the current group, appends the provided `expense` to the list of expenses,
+    /// and returns the new group. The original group remains unchanged.
     ///
     /// # Arguments
     ///
-    /// * `expense` - The expense to add to the group.
+    /// * `expense` - A reference to the `Expense` to add to the group.
     ///
-    /// # Examples
+    /// # Returns
+    ///
+    /// A new `Group` instance containing all existing expenses plus the newly added expense.
     ///
     /// ```rust
     /// use duckcount_algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
@@ -98,9 +112,12 @@ impl Group {
     /// let expense = Expense::new(&creditor_id, "100.0", beneficiaries).unwrap();
     /// group.add_expense(&expense);
     /// ```
-    pub fn add_expense(&self, expense: &Expense) {
-        // TODO: REMOVE UNWRAP!
-        self.expenses.lock().unwrap().push(expense.copy());
+    pub fn with_added_expense(&self, expense: &Expense) -> Group {
+        let mut new_group = self.clone();
+
+        new_group.expenses.push(expense.clone());
+
+        new_group
     }
 
     /// Calculates the net debt for each user based on their expenses.
@@ -146,17 +163,11 @@ impl Group {
     pub fn calculate_net_debts_per_user(&self) -> Result<HashMap<String, String>, GroupError> {
         let mut net_debts = HashMap::new();
 
-        // TODO: Is this really the way to do it?
-        let users_id = self.users_id.lock().unwrap();
-
-        for user_id in users_id.deref() {
+        for user_id in self.users_id.deref() {
             net_debts.insert(user_id.clone(), BigDecimal::zero().to_plain_string());
         }
 
-        // TODO: Is this really the way to do it?
-        let expenses = self.expenses.lock().unwrap();
-
-        for expense in expenses.deref() {
+        for expense in self.expenses.deref() {
             let net_debt = net_debts
                 .entry(expense.creditor_id.clone())
                 .or_insert(BigDecimal::zero().to_plain_string());
@@ -253,7 +264,7 @@ impl Group {
         let mut creditors = BinaryHeap::new();
 
         for (user_id, debt) in debts {
-            let debt = BigDecimal::from_str(&debt).map_err(|_| GroupError::MalformedAmount)?; // TODO: Remove unwrap.
+            let debt = BigDecimal::from_str(&debt).map_err(|_| GroupError::MalformedAmount)?;
 
             if debt < BigDecimal::zero() {
                 debtors.push(Debt::new(&-debt, &user_id));
