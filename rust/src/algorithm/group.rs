@@ -39,7 +39,7 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::group::Group;
+    /// use lib_duckcount::algorithm::group::Group;
     ///
     /// let mut group = Group::new();
     /// ```
@@ -67,7 +67,7 @@ impl Group {
     /// # Examples
     ///
     /// ```rust
-    /// use duckcount_algorithm::group::Group;
+    /// use lib_duckcount::algorithm::group::Group;
     /// use uuid::Uuid;
     ///
     /// let mut group = Group::new();
@@ -97,7 +97,7 @@ impl Group {
     /// A new `Group` instance containing all existing expenses plus the newly added expense.
     ///
     /// ```rust
-    /// use duckcount_algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
+    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
     /// use uuid::Uuid;
     ///
     /// let mut group = Group::new();
@@ -110,7 +110,7 @@ impl Group {
     /// ];
     ///
     /// let expense = Expense::new(&creditor_id, "100.0", beneficiaries).unwrap();
-    /// group.add_expense(&expense);
+    /// group.with_added_expense(&expense);
     /// ```
     pub fn with_added_expense(&self, expense: &Expense) -> Group {
         let mut new_group = self.clone();
@@ -137,7 +137,7 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::group::Group;
+    /// use lib_duckcount::algorithm::group::Group;
     ///
     /// let mut group = Group::new();
     ///
@@ -233,7 +233,7 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::group::Group;
+    /// use lib_duckcount::algorithm::group::Group;
     ///
     /// let mut group = Group::new();
     ///

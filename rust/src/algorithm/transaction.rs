@@ -28,7 +28,7 @@ impl Transaction {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::transaction::Transaction;
+    /// use lib_duckcount::algorithm::transaction::Transaction;
     /// use uuid::Uuid;
     ///
     /// let debtor_id = Uuid::new_v4().to_string();

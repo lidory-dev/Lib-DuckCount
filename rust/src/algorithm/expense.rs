@@ -85,7 +85,7 @@ impl Expense {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::{beneficiary::Beneficiary, expense::Expense};
+    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, expense::Expense};
     /// use uuid::Uuid;
     ///
     /// let alice_id = Uuid::new_v4().to_string();

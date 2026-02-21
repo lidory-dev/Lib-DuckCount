@@ -22,7 +22,7 @@ pub const NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE: usize = 32;
 /// # Example
 ///
 /// ```rust
-/// use duckcount_cryptography::encryption::keys::generate_symmetric_deterministic_encryption_key;
+/// use lib_duckcount::cryptography::encryption::keys::generate_symmetric_deterministic_encryption_key;
 ///
 /// let key = generate_symmetric_deterministic_encryption_key();
 ///
@@ -47,7 +47,7 @@ pub fn generate_symmetric_deterministic_encryption_key() -> Vec<u8> {
 /// # Example
 ///
 /// ```rust
-/// use duckcount_cryptography::encryption::keys::generate_symmetric_encryption_key;
+/// use lib_duckcount::cryptography::encryption::keys::generate_symmetric_encryption_key;
 ///
 /// let key = generate_symmetric_encryption_key();
 ///
@@ -93,7 +93,7 @@ pub enum KeyUsage {
 ///
 /// ```rust
 /// use argon2::password_hash::SaltString;
-/// use duckcount_cryptography::encryption::keys::{derive_key, KeyUsage};
+/// use lib_duckcount::cryptography::encryption::keys::{derive_key, KeyUsage};
 /// use rand::rngs::OsRng;
 ///
 /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();

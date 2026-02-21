@@ -70,7 +70,7 @@ impl UserVault {
     /// # Example
     ///
     /// ```rust
-    /// use duckcount_cryptography::vault::vault::UserVault;
+    /// use lib_duckcount::cryptography::vault::vault::UserVault;
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///
@@ -132,7 +132,7 @@ impl UserVault {
     /// # Example
     ///
     /// ```rust
-    /// use duckcount_cryptography::vault::vault::UserVault;
+    /// use lib_duckcount::cryptography::vault::vault::UserVault;
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///
@@ -190,7 +190,7 @@ impl UserVault {
     /// # Example
     ///
     /// ```rust
-    /// use duckcount_cryptography::vault::vault::UserVault;
+    /// use lib_duckcount::cryptography::vault::vault::UserVault;
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///
@@ -240,7 +240,7 @@ impl UserVault {
     /// # Example
     ///
     /// ```rust
-    /// use duckcount_cryptography::vault::{group::GroupMetadata, vault::UserVault};
+    /// use lib_duckcount::cryptography::vault::{group_metadata::GroupMetadata, vault::UserVault};
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///

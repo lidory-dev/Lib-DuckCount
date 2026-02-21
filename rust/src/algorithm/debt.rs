@@ -37,7 +37,7 @@ impl Debt {
     /// use std::str::FromStr;
     ///
     /// use bigdecimal::BigDecimal;
-    /// use duckcount_algorithm::debt::Debt;
+    /// use lib_duckcount::algorithm::debt::Debt;
     /// use uuid::Uuid;
     ///
     /// let amount = BigDecimal::from_str("100.0").unwrap();

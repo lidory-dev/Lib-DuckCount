@@ -41,7 +41,7 @@ pub struct EncryptedTextAndNonce {
 /// # Example
 ///
 /// ```rust
-/// use duckcount_cryptography::encryption::{
+/// use lib_duckcount::cryptography::encryption::{
 ///     encrypt::encrypt_deterministically_using_symmetric_key,
 ///     keys::generate_symmetric_deterministic_encryption_key,
 /// };
@@ -100,7 +100,7 @@ pub fn encrypt_deterministically_using_symmetric_key(
 /// # Example
 ///
 /// ```rust
-/// use duckcount_cryptography::encryption::{
+/// use lib_duckcount::cryptography::encryption::{
 ///     encrypt::encrypt_using_symmetric_key,
 ///     keys::generate_symmetric_encryption_key,
 /// };

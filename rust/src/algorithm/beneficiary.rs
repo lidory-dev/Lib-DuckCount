@@ -28,7 +28,7 @@ impl Beneficiary {
     /// Basic usage:
     ///
     /// ```rust
-    /// use duckcount_algorithm::beneficiary::Beneficiary;
+    /// use lib_duckcount::algorithm::beneficiary::Beneficiary;
     /// use uuid::Uuid;
     ///
     /// let user_id = Uuid::new_v4().to_string();
@@ -39,7 +39,7 @@ impl Beneficiary {
     /// Example with no specified share:
     ///
     /// ```rust
-    /// use duckcount_algorithm::beneficiary::Beneficiary;
+    /// use lib_duckcount::algorithm::beneficiary::Beneficiary;
     /// use uuid::Uuid;
     ///
     /// let user_id = Uuid::new_v4().to_string();
