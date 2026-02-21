@@ -18,9 +18,11 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_groups() {
+    fn test_vault_groups_metadata() {
         let user_vault = UserVault::new(&PASSWORD.as_bytes().to_vec()).unwrap();
 
-        user_vault.groups(&PASSWORD.as_bytes().to_vec()).unwrap();
+        user_vault
+            .groups_metadata(&PASSWORD.as_bytes().to_vec())
+            .unwrap();
     }
 }

@@ -11,7 +11,7 @@ use crate::cryptography::{
         decrypt::decrypt_using_symmetric_key,
         keys::{KeyUsage, derive_key},
     },
-    vault::{encrypted_field::EncryptedField, group::Group},
+    vault::{encrypted_field::EncryptedField, group_metadata::GroupMetadata},
 };
 
 /// User vault related errors.
@@ -44,7 +44,7 @@ pub struct UserVault {
     salt: String,
     /// An encrypted JSON object representing a list of group UUID,
     /// along with their corresponding group master key.
-    groups: EncryptedField,
+    groups_metadata: EncryptedField,
 }
 
 #[uniffi::export]
@@ -52,7 +52,7 @@ impl UserVault {
     /// Creates a new, empty `UserVault` instance using the provided secret.
     ///
     /// This constructor generates a cryptographically secure salt, derives an encryption key from the provided `secret`, and generated salt.
-    /// An empty list of groups is encrypted using the derived key and stored in the vault.
+    /// An empty list of groups metadata is encrypted using the derived key and stored in the vault.
     ///
     /// # Arguments
     ///
@@ -65,7 +65,7 @@ impl UserVault {
     /// # Errors
     ///
     /// * `UserVaultError::KeyError` - If the encryption key derivation fails.
-    /// * `UserVaultError::EncryptionError` - If encrypting the groups fails.
+    /// * `UserVaultError::EncryptionError` - If encrypting the groups metadata fails.
     ///
     /// # Example
     ///
@@ -83,12 +83,13 @@ impl UserVault {
         let encryption_key = derive_key(secret, salt.to_string(), KeyUsage::NonDeterministic)
             .map_err(|_| UserVaultError::KeyError(KeyError::DerivationFailed))?;
 
-        let encrypted_groups = EncryptedField::new(&encryption_key, &"[]".as_bytes().to_vec())
-            .map_err(|_| UserVaultError::EncryptionError(EncryptionError::EncryptionFailed))?;
+        let encrypted_groups_metadata =
+            EncryptedField::new(&encryption_key, &"[]".as_bytes().to_vec())
+                .map_err(|_| UserVaultError::EncryptionError(EncryptionError::EncryptionFailed))?;
 
         Ok(UserVault {
             salt: salt.to_string(),
-            groups: encrypted_groups,
+            groups_metadata: encrypted_groups_metadata,
         })
     }
 
@@ -166,24 +167,25 @@ impl UserVault {
             .map_err(|_| UserVaultError::KeyError(KeyError::DerivationFailed))
     }
 
-    /// Retrieves the list of groups stored in the vault.
+    /// Retrieves the list of group metadata stored in the vault.
     ///
-    /// This method decrypts the encrypted list of groups using the provided `secret`,
-    /// and returns the deserialized list as a vector of `Group` objects.
+    /// This method decrypts the encrypted list of group metadata using the provided `secret`,
+    /// and returns the deserialized list as a vector of `GroupMetadata` objects.
     ///
     /// # Arguments
     ///
-    /// * `secret` - A secret key (as a byte vector) used to derive the encryption key for decrypting the list of groups.
+    /// * `secret` - A secret key (as a byte vector) used to derive the encryption key for decrypting the list of group metadata.
     ///
     /// # Returns
     ///
-    /// * `Result<Vec<Group>, UserVaultError>` - A vector of `Group` objects representing the list of groups, or an error if decryption or deserialization fails.
+    /// * `Result<Vec<GroupMetadata>, UserVaultError>` - A vector of `GroupMetadata` objects, each containing the metadata for a group,
+    ///   or an error if decryption or deserialization fails.
     ///
     /// # Errors
     ///
     /// * `UserVaultError::KeyError` - If the encryption key derivation fails.
-    /// * `UserVaultError::EncryptionError` - If decryption of the list of groups fails.
-    /// * `UserVaultError::DeserializationFailed` - If deserialization of the decrypted data into `Vec<Group>` fails.
+    /// * `UserVaultError::EncryptionError` - If decryption of the list of group metadata fails.
+    /// * `UserVaultError::DeserializationFailed` - If deserialization of the decrypted data into `Vec<GroupMetadata>` fails.
     ///
     /// # Example
     ///
@@ -192,51 +194,53 @@ impl UserVault {
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///
-    /// // Please note that the list of groups is empty for a new vault.
+    /// // Please note that the list of groups metadata is empty for a new vault.
     /// let user_vault = UserVault::new(&secret).unwrap();
     ///
-    /// let groups = user_vault.groups(&secret).unwrap();
-    /// for group in groups {
-    ///     println!("Group: {:?}", group.uuid);
+    /// let groups_metadata = user_vault.groups_metadata(&secret).unwrap();
+    /// for group_metadata in groups_metadata {
+    ///     println!("Group metadata: {:?}", group_metadata.uuid);
     /// }
     /// ```
-    pub fn groups(&self, secret: &Vec<u8>) -> Result<Vec<Group>, UserVaultError> {
+    pub fn groups_metadata(&self, secret: &Vec<u8>) -> Result<Vec<GroupMetadata>, UserVaultError> {
         let encryption_key = self.derive_encryption_key(secret)?;
 
-        let decrypted_group_master_keys =
-            decrypt_using_symmetric_key(&encryption_key, &self.groups.field, &self.groups.nonce)
-                .map_err(|_| UserVaultError::EncryptionError(EncryptionError::DecryptionFailed))?;
-
-        Ok(
-            serde_json::from_slice(decrypted_group_master_keys.as_slice())
-                .map_err(|_| UserVaultError::DeserializationFailed)?,
+        let decrypted_groups_metadata = decrypt_using_symmetric_key(
+            &encryption_key,
+            &self.groups_metadata.field,
+            &self.groups_metadata.nonce,
         )
+        .map_err(|_| UserVaultError::EncryptionError(EncryptionError::DecryptionFailed))?;
+
+        Ok(serde_json::from_slice(decrypted_groups_metadata.as_slice())
+            .map_err(|_| UserVaultError::DeserializationFailed)?)
     }
 
-    /// Creates a new `UserVault` with an additional group.
+    /// Creates a new `UserVault` with an additional group metadata.
     ///
-    /// This method decrypts the current list of groups, appends the new `Group`,
+    /// This method decrypts the current list of groups metadata, appends the new `GroupMetadata`,
     /// re-encrypts the updated list, and returns a new `UserVault` instance with the updated state.
     ///
     /// # Arguments
     ///
-    /// * `secret` - A secret key (as a byte vector) used to derive the encryption key for decrypting and re-encrypting the groups.
-    /// * `group` - The new `Group` to add to the vault's list of groups.
+    /// * `secret` - A secret key (as a byte vector) used to derive the encryption key for decrypting and re-encrypting the groups metadata.
+    /// * `group_metadata` - The new `GroupMetadata` to add to the vault's list of groups metadata.
     ///
     /// # Returns
     ///
-    /// * `Result<UserVault, UserVaultError>` - A new `UserVault` instance with the updated list of groups, or an error if decryption, serialization, or encryption fails.
+    /// * `Result<UserVault, UserVaultError>` - A new `UserVault` instance with the updated list of groups metadata,
+    ///     or an error if decryption, serialization, or encryption fails.
     ///
     /// # Errors
     ///
     /// * `UserVaultError::KeyError` - If the encryption key derivation fails.
     /// * `UserVaultError::EncryptionError` - If decryption or encryption of the group master keys fails.
-    /// * `UserVaultError::DeserializationFailed` - If deserialization of the list of groups fails during the process.
+    /// * `UserVaultError::DeserializationFailed` - If deserialization of the list of groups metadata fails during the process.
     ///
     /// # Example
     ///
     /// ```rust
-    /// use duckcount_cryptography::vault::{group::Group, vault::UserVault};
+    /// use duckcount_cryptography::vault::{group::GroupMetadata, vault::UserVault};
     ///
     /// let secret = "&eHml-C_AFyWdylXLd50".as_bytes().to_vec();
     ///
@@ -244,30 +248,33 @@ impl UserVault {
     ///
     /// let group_uuid = String::from("deab0e9a-1c9a-4028-81f6-8a76688af5fb");
     /// let group_master_key = "6%CejBWW@fq*...".as_bytes().to_vec();
-    /// let group = Group { uuid: group_uuid, master_key: group_master_key };
+    /// let group = GroupMetadata { uuid: group_uuid, master_key: group_master_key };
     ///
     /// let updated_vault = user_vault.with_added_group(&secret, group).unwrap();
     /// ```
     pub fn with_added_group(
         &self,
         secret: &Vec<u8>,
-        group: Group,
+        group_metadata: GroupMetadata,
     ) -> Result<UserVault, UserVaultError> {
-        let mut groups = self.groups(secret)?;
+        let mut groups_metadata = self.groups_metadata(secret)?;
 
-        groups.push(group);
+        groups_metadata.push(group_metadata);
 
         let encryption_key = self.derive_encryption_key(secret)?;
 
-        let serialized_groups =
-            serde_json::to_string(&groups).map_err(|_| UserVaultError::DeserializationFailed)?;
+        let serialized_groups_metadata = serde_json::to_string(&groups_metadata)
+            .map_err(|_| UserVaultError::DeserializationFailed)?;
 
-        let encrypted_groups =
-            EncryptedField::new(&encryption_key, &serialized_groups.as_bytes().to_vec())
-                .map_err(|_| UserVaultError::EncryptionError(EncryptionError::EncryptionFailed))?;
+        let encrypted_groups_metadata = EncryptedField::new(
+            &encryption_key,
+            &serialized_groups_metadata.as_bytes().to_vec(),
+        )
+        .map_err(|_| UserVaultError::EncryptionError(EncryptionError::EncryptionFailed))?;
 
         let mut new_vault = self.clone();
-        new_vault.groups = encrypted_groups;
+
+        new_vault.groups_metadata = encrypted_groups_metadata;
 
         Ok(new_vault)
     }
