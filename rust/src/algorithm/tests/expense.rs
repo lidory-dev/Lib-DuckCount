@@ -174,8 +174,6 @@ mod tests {
         let mut count_33_33 = 0;
 
         for share in shares.values() {
-            println!("share: {}", share);
-
             if *share == "33.34" {
                 count_33_34 += 1;
             } else if *share == "33.33" {
@@ -186,7 +184,7 @@ mod tests {
         assert_eq!(count_33_34, 1);
         assert_eq!(count_33_33, 2);
 
-        // Also check that the total is correct (100.0)
+        // Also check that the total is correct (100.00)
         let sum = shares
             .values()
             .map(|s| BigDecimal::from_str(s).expect("Failed to parse string as BigDecimal"))
@@ -222,12 +220,53 @@ mod tests {
 
         assert_eq!(count_33333, shares.values().len());
 
-        // Also check that the total is correct (100.0)
+        // Also check that the total is correct (99999)
         let sum = shares
             .values()
             .map(|s| BigDecimal::from_str(s).expect("Failed to parse string as BigDecimal"))
             .fold(BigDecimal::zero(), |acc, x| acc + x);
 
         assert!(sum == BigDecimal::from_str("99999").unwrap());
+    }
+
+    #[test]
+    fn test_simple_rounding_needed_no_subunit() {
+        let creditor_id = Uuid::new_v4().to_string();
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+        let charlie_id = Uuid::new_v4().to_string();
+
+        let beneficiaries = vec![
+            Beneficiary::new(&alice_id, None),
+            Beneficiary::new(&bob_id, None),
+            Beneficiary::new(&charlie_id, None),
+        ];
+
+        let currency = Currency::new("Yen", "¥", false).unwrap();
+        let expense = Expense::new(&creditor_id, "1000", &currency, beneficiaries).unwrap();
+        let shares = expense.calculate_equal_shares().unwrap();
+
+        // One share should be 334 and the others 333
+        let mut count_334 = 0;
+        let mut count_333 = 0;
+
+        for share in shares.values() {
+            if *share == "334" {
+                count_334 += 1;
+            } else if *share == "333" {
+                count_333 += 1;
+            }
+        }
+
+        assert_eq!(count_334, 1);
+        assert_eq!(count_333, 2);
+
+        // Also check that the total is correct (1000)
+        let sum = shares
+            .values()
+            .map(|s| BigDecimal::from_str(s).expect("Failed to parse string as BigDecimal"))
+            .fold(BigDecimal::zero(), |acc, x| acc + x);
+
+        assert!(sum == BigDecimal::from_str("1000").unwrap());
     }
 }

@@ -208,10 +208,16 @@ impl Expense {
             return Ok(shares);
         }
 
+        // For now, if the currency has a subunit, we consider it to be cents.
+        let scale = match self.currency.has_sub_unit {
+            true => 100,
+            false => 1,
+        };
+
         let divided_amount = Expense::divide_amount(
             &remaining_amount_str,
             number_of_beneficiaries_without_share,
-            100, // 100 to convert to cents, 1 to keep as is.
+            scale,
         )?;
 
         let mut divided_amount_iter = divided_amount.into_iter();
