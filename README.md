@@ -51,7 +51,7 @@ fn main() {
     ];
 
     let expense = Expense::new(&alice_id, "100.0", &currency, beneficiaries).unwrap();
-    let group = group.with_added_expense(&expense);
+    let group = group.with_added_expense(&expense).unwrap();
 
     let net_debts = group.calculate_net_debts_per_user().unwrap();
     for (user_id, debt) in net_debts {

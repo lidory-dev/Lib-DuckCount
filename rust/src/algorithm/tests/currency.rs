@@ -2,8 +2,6 @@
 mod tests {
     use crate::algorithm::currency::{Currency, CurrencyError};
 
-    // TODO: Test the addition of an expense with a subunit in a group where the currency does not have any subunit.
-
     #[test]
     fn test_create_currency_with_subunit() {
         let _currency = Currency::new("Euro", "€", true).unwrap();

@@ -17,6 +17,9 @@ pub enum GroupError {
     /// The amount is malformed.
     #[error("The amount is malformed.")]
     MalformedAmount,
+    /// The expense to add does not have the same currency as the group.
+    #[error("The expense to add does not have the same currency as the group.")]
+    WrongCurrency,
 }
 
 /// Represents a group of users and their shared expenses.
@@ -126,12 +129,16 @@ impl Group {
     /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
     /// group.with_added_expense(&expense);
     /// ```
-    pub fn with_added_expense(&self, expense: &Expense) -> Group {
+    pub fn with_added_expense(&self, expense: &Expense) -> Result<Group, GroupError> {
+        if expense.currency != self.currency {
+            return Err(GroupError::WrongCurrency);
+        }
+
         let mut new_group = self.clone();
 
         new_group.expenses.push(expense.clone());
 
-        new_group
+        Ok(new_group)
     }
 
     /// Calculates the net debt for each user based on their expenses.

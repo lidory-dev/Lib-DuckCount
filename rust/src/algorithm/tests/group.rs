@@ -3,12 +3,13 @@ mod tests {
     use std::str::FromStr;
 
     use crate::algorithm::{
-        beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group,
+        beneficiary::Beneficiary,
+        currency::Currency,
+        expense::Expense,
+        group::{Group, GroupError},
     };
     use bigdecimal::BigDecimal;
     use uuid::Uuid;
-
-    // TODO: Add an expense in another currency than the group (should not work, at least for now)
 
     #[test]
     fn test_group_new() {
@@ -42,9 +43,28 @@ mod tests {
         )];
         let expense = Expense::new(&creditor_id, amount, &currency, beneficiaries).unwrap();
 
-        let group = group.with_added_expense(&expense);
+        let group = group.with_added_expense(&expense).unwrap();
 
         assert_eq!(group.expenses.len(), 1);
+    }
+
+    #[test]
+    fn test_add_expense_wrong_currency() {
+        let group_currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&group_currency);
+        let creditor_id = Uuid::new_v4().to_string();
+        let amount = "100.00";
+        let beneficiaries = vec![Beneficiary::new(
+            &Uuid::new_v4().to_string(),
+            Some(String::from("100.00")),
+        )];
+
+        let expense_currency = Currency::new("Dollar", "$", true).unwrap();
+        let expense = Expense::new(&creditor_id, amount, &expense_currency, beneficiaries).unwrap();
+
+        let group_error = group.with_added_expense(&expense).unwrap_err();
+
+        assert_eq!(group_error, GroupError::WrongCurrency);
     }
 
     #[test]
@@ -65,7 +85,7 @@ mod tests {
         ];
 
         let expense = Expense::new(&alice_id, "100.00", &currency, beneficiaries).unwrap();
-        let group = group.with_added_expense(&expense);
+        let group = group.with_added_expense(&expense).unwrap();
 
         let net_debts = group.calculate_net_debts_per_user().unwrap();
 
@@ -101,7 +121,7 @@ mod tests {
         ];
 
         let expense = Expense::new(&alice_id, "100.00", &currency, beneficiaries).unwrap();
-        let group = group.with_added_expense(&expense);
+        let group = group.with_added_expense(&expense).unwrap();
 
         let transactions = group.calculate_transactions_to_equilibrate().unwrap();
 
