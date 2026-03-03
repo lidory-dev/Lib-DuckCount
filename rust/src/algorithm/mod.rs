@@ -1,4 +1,5 @@
 pub mod beneficiary;
+pub mod currency;
 pub mod debt;
 pub mod expense;
 pub mod group;

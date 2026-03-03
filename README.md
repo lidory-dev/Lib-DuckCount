@@ -30,11 +30,12 @@ A Rust library for **shared expense management** and **secure cryptographic util
 ### Expense Management Example
 
 ```rust
-use lib_duckcount::algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
+use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
 use uuid::Uuid;
 
 fn main() {
-    let group = Group::new();
+    let currency = Currency::new("Euro", "€", true).unwrap();
+    let group = Group::new(&currency);
 
     let alice_id = Uuid::new_v4().to_string();
     let bob_id = Uuid::new_v4().to_string();

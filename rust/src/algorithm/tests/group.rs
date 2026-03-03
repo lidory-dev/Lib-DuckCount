@@ -2,20 +2,24 @@
 mod tests {
     use std::str::FromStr;
 
-    use crate::algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
+    use crate::algorithm::{
+        beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group,
+    };
     use bigdecimal::BigDecimal;
     use uuid::Uuid;
 
     #[test]
     fn test_group_new() {
-        let group = Group::new();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
         assert!(group.users_id.is_empty());
         assert!(group.expenses.is_empty());
     }
 
     #[test]
     fn test_add_user() {
-        let group = Group::new();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
         let user_id = Uuid::new_v4().to_string();
 
         let group = group.with_added_user(&user_id);
@@ -26,7 +30,8 @@ mod tests {
 
     #[test]
     fn test_add_expense() {
-        let group = Group::new();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
         let creditor_id = Uuid::new_v4().to_string();
         let amount = "100.00";
         let beneficiaries = vec![Beneficiary::new(
@@ -42,7 +47,8 @@ mod tests {
 
     #[test]
     fn test_calculate_net_debts_per_user() {
-        let group = Group::new();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();
@@ -77,7 +83,8 @@ mod tests {
 
     #[test]
     fn test_calculate_transactions_to_equilibrate() {
-        let group = Group::new();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();

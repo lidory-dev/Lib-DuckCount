@@ -7,6 +7,8 @@ use thiserror::Error;
 
 use bigdecimal::{BigDecimal, Zero};
 
+use crate::algorithm::currency::Currency;
+
 use super::{debt::Debt, expense::Expense, transaction::Transaction};
 
 /// Represents possible errors that can occur when creating an expense.
@@ -24,6 +26,8 @@ pub enum GroupError {
 /// and determine the transactions needed to equilibrate debts among users.
 #[derive(Debug, Clone, uniffi::Object)]
 pub struct Group {
+    /// The currency used by the group.
+    pub currency: Currency,
     /// A list of user IDs in the group.
     pub users_id: Vec<String>,
     /// A list of expenses associated with the group.
@@ -34,18 +38,25 @@ pub struct Group {
 impl Group {
     /// Creates a new, empty [Group].
     ///
+    /// # Arguments
+    ///
+    /// * `currency` - A reference to a [Currency] object, which defines the currency used for all expenses within the group.
+    ///
     /// # Examples
     ///
     /// Basic usage:
     ///
     /// ```rust
+    /// use lib_duckcount::algorithm::currency::Currency;
     /// use lib_duckcount::algorithm::group::Group;
     ///
-    /// let mut group = Group::new();
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let mut group = Group::new(&currency);
     /// ```
     #[uniffi::constructor]
-    pub fn new() -> Self {
+    pub fn new(currency: &Currency) -> Self {
         Self {
+            currency: currency.to_owned(),
             users_id: Vec::new(),
             expenses: Vec::new(),
         }
@@ -67,10 +78,12 @@ impl Group {
     /// # Examples
     ///
     /// ```rust
+    /// use lib_duckcount::algorithm::currency::Currency;
     /// use lib_duckcount::algorithm::group::Group;
     /// use uuid::Uuid;
     ///
-    /// let mut group = Group::new();
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let mut group = Group::new(&currency);
     ///
     /// let user_id = Uuid::new_v4().to_string();
     /// group.with_added_user(&user_id);
@@ -97,10 +110,11 @@ impl Group {
     /// A new `Group` instance containing all existing expenses plus the newly added expense.
     ///
     /// ```rust
-    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, expense::Expense, group::Group};
+    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
     /// use uuid::Uuid;
     ///
-    /// let mut group = Group::new();
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let mut group = Group::new(&currency);
     ///
     /// let creditor_id = Uuid::new_v4().to_string();
     /// let alice_id = Uuid::new_v4().to_string();
@@ -137,9 +151,10 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// use lib_duckcount::algorithm::group::Group;
+    /// use lib_duckcount::algorithm::{currency::Currency, group::Group};
     ///
-    /// let mut group = Group::new();
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let mut group = Group::new(&currency);
     ///
     /// let net_debts = group.calculate_net_debts_per_user().unwrap();
     /// for (user_id, debt) in net_debts {
@@ -233,9 +248,10 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// use lib_duckcount::algorithm::group::Group;
+    /// use lib_duckcount::algorithm::{currency::Currency, group::Group};
     ///
-    /// let mut group = Group::new();
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let mut group = Group::new(&currency);
     ///
     /// let transactions = group.calculate_transactions_to_equilibrate().unwrap();
     /// for transaction in transactions {
