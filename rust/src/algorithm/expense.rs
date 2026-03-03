@@ -5,6 +5,8 @@ use bigdecimal::num_bigint::ToBigInt;
 use bigdecimal::{BigDecimal, RoundingMode, Zero};
 use thiserror::Error;
 
+use crate::algorithm::currency::Currency;
+
 use super::beneficiary::Beneficiary;
 
 /// Represents possible errors that can occur when creating an expense.
@@ -36,6 +38,11 @@ pub enum ExpenseError {
     /// A type could not be converted.
     #[error("A type could not be converted.")]
     InternalTypeConversionFailed,
+    /// The amount of the expense or the share of a beneficiary uses subunits, but the currency does not support fractional amounts (e.g., ¥12.50 for a currency that only allows whole units).
+    #[error(
+        "The amount or the share of a beneficiary uses subunits, but the currency does not support fractional amounts."
+    )]
+    UnsupportedSubunits,
 }
 
 /// Represents an expense made by a creditor, distributed among multiple beneficiaries.
@@ -49,6 +56,8 @@ pub struct Expense {
     pub creditor_id: String,
     /// The total amount of the expense.
     pub amount: String,
+    /// The currency in which the expense is made.
+    pub currency: Currency,
     /// The total amount that has been explicitly shared among beneficiaries.
     pub total_share_amount: String,
     /// The number of beneficiaries without an explicitly specified share.
@@ -61,7 +70,7 @@ pub struct Expense {
 impl Expense {
     /// Attempts to create a new [Expense].
     ///
-    /// This constructor initializes an [Expense] with the given creditor ID, total amount, and list of beneficiaries.
+    /// This constructor initializes an [Expense] with the given creditor ID, total amount, currency, and list of beneficiaries.
     /// It validates the inputs and calculates the total share amount and the number of beneficiaries without a specified share by iterating
     /// through the beneficiaries.
     ///
@@ -69,6 +78,7 @@ impl Expense {
     ///
     /// * `creditor_id` - The ID of the creditor who made the expense.
     /// * `amount` - The total amount of the expense.
+    /// * `currency` - The currency in which the expense is made.
     /// * `beneficiaries` - A list of beneficiaries who share this expense.
     ///
     /// # Errors
@@ -79,38 +89,45 @@ impl Expense {
     /// - The sum of the shares exceeds the total expense amount.
     /// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
     /// - Any share amount is not positive.
+    /// - The expense amount or any share uses subunits, but the currency does not support fractional amounts.
     ///
     /// # Examples
     ///
     /// Basic usage:
     ///
     /// ```rust
-    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, expense::Expense};
+    /// use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense};
     /// use uuid::Uuid;
     ///
     /// let alice_id = Uuid::new_v4().to_string();
     /// let bob_id = Uuid::new_v4().to_string();
     /// let creditor_id = Uuid::new_v4().to_string();
     ///
-    /// let amount = "100.0";
+    /// let amount = "100.00";
     ///
     /// let beneficiaries = vec![
-    ///     Beneficiary::new(&alice_id, Some(String::from("50.0"))),
+    ///     Beneficiary::new(&alice_id, Some(String::from("50.0 0"))),
     ///     Beneficiary::new(&bob_id, None),
     /// ];
     ///
-    /// let expense = Expense::new(&creditor_id, amount, beneficiaries);
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let expense = Expense::new(&creditor_id, amount, &currency, beneficiaries);
     /// ```
     #[uniffi::constructor]
     pub fn new(
         creditor_id: &str,
         amount: &str,
+        currency: &Currency,
         beneficiaries: Vec<Beneficiary>,
     ) -> Result<Self, ExpenseError> {
         let amount = BigDecimal::from_str(&amount).map_err(|_| ExpenseError::MalformedAmount)?;
 
         if amount <= BigDecimal::zero() {
             return Err(ExpenseError::NonPositiveAmount);
+        }
+
+        if !currency.has_sub_unit && amount.fractional_digit_count() > 0 {
+            return Err(ExpenseError::UnsupportedSubunits);
         }
 
         if beneficiaries.is_empty() {
@@ -127,6 +144,10 @@ impl Expense {
 
                 if share_amount <= BigDecimal::zero() {
                     return Err(ExpenseError::NonPositiveShare);
+                }
+
+                if !currency.has_sub_unit && share_amount.fractional_digit_count() > 0 {
+                    return Err(ExpenseError::UnsupportedSubunits);
                 }
 
                 total_share_amount += share_amount;
@@ -148,6 +169,7 @@ impl Expense {
         Ok(Expense {
             creditor_id: creditor_id.to_string(),
             amount: amount.to_plain_string(),
+            currency: currency.to_owned(),
             total_share_amount: total_share_amount.to_plain_string(),
             number_of_beneficiaries_without_share: number_of_beneficiaries_without_share
                 .to_plain_string(),
@@ -208,6 +230,7 @@ impl Expense {
         Expense {
             creditor_id: self.creditor_id.clone(),
             amount: self.amount.clone(),
+            currency: self.currency.clone(),
             total_share_amount: self.total_share_amount.clone(),
             number_of_beneficiaries_without_share: self
                 .number_of_beneficiaries_without_share

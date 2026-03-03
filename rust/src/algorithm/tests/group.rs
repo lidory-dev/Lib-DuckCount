@@ -8,6 +8,8 @@ mod tests {
     use bigdecimal::BigDecimal;
     use uuid::Uuid;
 
+    // TODO: Add an expense in another currency than the group (should not work, at least for now)
+
     #[test]
     fn test_group_new() {
         let currency = Currency::new("Euro", "€", true).unwrap();
@@ -38,7 +40,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
             Some(String::from("100.00")),
         )];
-        let expense = Expense::new(&creditor_id, amount, beneficiaries).unwrap();
+        let expense = Expense::new(&creditor_id, amount, &currency, beneficiaries).unwrap();
 
         let group = group.with_added_expense(&expense);
 
@@ -62,7 +64,7 @@ mod tests {
             Beneficiary::new(&charlie_id, None),
         ];
 
-        let expense = Expense::new(&alice_id, "100.00", beneficiaries).unwrap();
+        let expense = Expense::new(&alice_id, "100.00", &currency, beneficiaries).unwrap();
         let group = group.with_added_expense(&expense);
 
         let net_debts = group.calculate_net_debts_per_user().unwrap();
@@ -98,7 +100,7 @@ mod tests {
             Beneficiary::new(&charlie_id, None),
         ];
 
-        let expense = Expense::new(&alice_id, "100.00", beneficiaries).unwrap();
+        let expense = Expense::new(&alice_id, "100.00", &currency, beneficiaries).unwrap();
         let group = group.with_added_expense(&expense);
 
         let transactions = group.calculate_transactions_to_equilibrate().unwrap();

@@ -4,6 +4,7 @@ mod tests {
 
     use crate::algorithm::{
         beneficiary::Beneficiary,
+        currency::Currency,
         expense::{Expense, ExpenseError},
     };
     use bigdecimal::{BigDecimal, Zero};
@@ -18,7 +19,8 @@ mod tests {
             Beneficiary::new(&Uuid::new_v4().to_string(), None),
         ];
 
-        let expense = Expense::new(&creditor_id, amount, beneficiaries).unwrap();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense = Expense::new(&creditor_id, amount, &currency, beneficiaries).unwrap();
 
         assert_eq!(expense.creditor_id, creditor_id);
         assert_eq!(expense.amount, amount);
@@ -38,7 +40,8 @@ mod tests {
             Some(String::from("50.00")),
         )];
 
-        let expense_result = Expense::new(&creditor_id, amount, beneficiaries);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
 
         assert!(expense_result.is_err());
         assert_eq!(expense_result.unwrap_err(), ExpenseError::NonPositiveAmount);
@@ -50,7 +53,8 @@ mod tests {
         let amount = "100.00";
         let beneficiaries = vec![];
 
-        let expense_result = Expense::new(&creditor_id, amount, beneficiaries);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
 
         assert!(expense_result.is_err());
         assert_eq!(expense_result.unwrap_err(), ExpenseError::NoBeneficiaries);
@@ -65,7 +69,8 @@ mod tests {
             Beneficiary::new(&Uuid::new_v4().to_string(), Some(String::from("50.00"))),
         ];
 
-        let expense_result = Expense::new(&creditor_id, amount, beneficiaries);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
 
         assert!(expense_result.is_err());
         assert_eq!(
@@ -83,7 +88,8 @@ mod tests {
             Beneficiary::new(&Uuid::new_v4().to_string(), Some(String::from("30.00"))),
         ];
 
-        let expense_result = Expense::new(&creditor_id, amount, beneficiaries);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
 
         assert!(expense_result.is_err());
         assert_eq!(
@@ -101,10 +107,49 @@ mod tests {
             Some(String::from("-10.00")),
         )];
 
-        let expense_result = Expense::new(&creditor_id, amount, beneficiaries);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
 
         assert!(expense_result.is_err());
         assert_eq!(expense_result.unwrap_err(), ExpenseError::NonPositiveShare);
+    }
+
+    #[test]
+    fn test_expense_new_currency_does_not_support_subunits_on_amount() {
+        let creditor_id = Uuid::new_v4().to_string();
+        let amount = "100.50";
+        let beneficiaries = vec![Beneficiary::new(
+            &Uuid::new_v4().to_string(),
+            Some(String::from("50")),
+        )];
+
+        let currency = Currency::new("Yen", "¥", false).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
+
+        assert!(expense_result.is_err());
+        assert_eq!(
+            expense_result.unwrap_err(),
+            ExpenseError::UnsupportedSubunits
+        );
+    }
+
+    #[test]
+    fn test_expense_new_currency_does_not_support_subunits_on_share() {
+        let creditor_id = Uuid::new_v4().to_string();
+        let amount = "100";
+        let beneficiaries = vec![Beneficiary::new(
+            &Uuid::new_v4().to_string(),
+            Some(String::from("50.50")),
+        )];
+
+        let currency = Currency::new("Yen", "¥", false).unwrap();
+        let expense_result = Expense::new(&creditor_id, amount, &currency, beneficiaries);
+
+        assert!(expense_result.is_err());
+        assert_eq!(
+            expense_result.unwrap_err(),
+            ExpenseError::UnsupportedSubunits
+        );
     }
 
     #[test]
@@ -120,7 +165,8 @@ mod tests {
             Beneficiary::new(&charlie_id, None),
         ];
 
-        let expense = Expense::new(&creditor_id, "100.00", beneficiaries).unwrap();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense = Expense::new(&creditor_id, "100.00", &currency, beneficiaries).unwrap();
         let shares = expense.calculate_equal_shares().unwrap();
 
         // One share should be 33.34 and the others 33.33
@@ -162,7 +208,8 @@ mod tests {
             Beneficiary::new(&charlie_id, None),
         ];
 
-        let expense = Expense::new(&creditor_id, "99999", beneficiaries).unwrap();
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let expense = Expense::new(&creditor_id, "99999", &currency, beneficiaries).unwrap();
         let shares = expense.calculate_equal_shares().unwrap();
 
         let mut count_33333 = 0;

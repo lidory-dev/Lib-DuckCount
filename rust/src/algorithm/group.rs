@@ -123,7 +123,7 @@ impl Group {
     ///     Beneficiary::new(&alice_id, None),
     /// ];
     ///
-    /// let expense = Expense::new(&creditor_id, "100.0", beneficiaries).unwrap();
+    /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
     /// group.with_added_expense(&expense);
     /// ```
     pub fn with_added_expense(&self, expense: &Expense) -> Group {

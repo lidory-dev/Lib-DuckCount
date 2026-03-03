@@ -50,7 +50,7 @@ fn main() {
         Beneficiary::new(&charlie_id, None),
     ];
 
-    let expense = Expense::new(&alice_id, &String::from("100.0"), beneficiaries).unwrap();
+    let expense = Expense::new(&alice_id, "100.0", &currency, beneficiaries).unwrap();
     let group = group.with_added_expense(&expense);
 
     let net_debts = group.calculate_net_debts_per_user().unwrap();
