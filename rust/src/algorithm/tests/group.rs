@@ -35,13 +35,16 @@ mod tests {
     fn test_add_expense() {
         let currency = Currency::new("Euro", "€", true).unwrap();
         let group = Group::new(&currency);
-        let creditor_id = Uuid::new_v4().to_string();
+
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+
+        let group = group.with_added_user(&alice_id);
+        let group = group.with_added_user(&bob_id);
+
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(
-            &Uuid::new_v4().to_string(),
-            Some(String::from("100.00")),
-        )];
-        let expense = Expense::new(&creditor_id, amount, &currency, beneficiaries).unwrap();
+        let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
+        let expense = Expense::new(&alice_id, amount, &currency, beneficiaries).unwrap();
 
         let group = group.with_added_expense(&expense).unwrap();
 
@@ -49,18 +52,59 @@ mod tests {
     }
 
     #[test]
+    fn test_add_expense_creditor_unknown() {
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
+
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+
+        let group = group.with_added_user(&bob_id);
+
+        let amount = "100.00";
+        let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
+        let expense = Expense::new(&alice_id, amount, &currency, beneficiaries).unwrap();
+
+        let group_result = group.with_added_expense(&expense).unwrap_err();
+
+        assert_eq!(group_result, GroupError::CreditorUnknown);
+    }
+
+    #[test]
+    fn test_add_expense_beneficiary_unknown() {
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let group = Group::new(&currency);
+
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+
+        let group = group.with_added_user(&alice_id);
+
+        let amount = "100.00";
+        let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
+        let expense = Expense::new(&alice_id, amount, &currency, beneficiaries).unwrap();
+
+        let group_result = group.with_added_expense(&expense).unwrap_err();
+
+        assert_eq!(group_result, GroupError::BeneficiaryUnknown);
+    }
+
+    #[test]
     fn test_add_expense_wrong_currency() {
         let group_currency = Currency::new("Euro", "€", true).unwrap();
         let group = Group::new(&group_currency);
-        let creditor_id = Uuid::new_v4().to_string();
+
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+
+        let group = group.with_added_user(&alice_id);
+        let group = group.with_added_user(&bob_id);
+
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(
-            &Uuid::new_v4().to_string(),
-            Some(String::from("100.00")),
-        )];
+        let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
 
         let expense_currency = Currency::new("Dollar", "$", true).unwrap();
-        let expense = Expense::new(&creditor_id, amount, &expense_currency, beneficiaries).unwrap();
+        let expense = Expense::new(&alice_id, amount, &expense_currency, beneficiaries).unwrap();
 
         let group_error = group.with_added_expense(&expense).unwrap_err();
 

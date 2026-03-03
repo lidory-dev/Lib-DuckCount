@@ -20,6 +20,12 @@ pub enum GroupError {
     /// The expense to add does not have the same currency as the group.
     #[error("The expense to add does not have the same currency as the group.")]
     WrongCurrency,
+    /// The creditor of the expense is not part of the group.
+    #[error("The creditor of the expense is not part of the group.")]
+    CreditorUnknown,
+    /// At least one of the beneficiary of the expense is not part of the group.
+    #[error("At least one of the beneficiary of the expense is not part of the group.")]
+    BeneficiaryUnknown,
 }
 
 /// Represents a group of users and their shared expenses.
@@ -130,6 +136,18 @@ impl Group {
     /// group.with_added_expense(&expense);
     /// ```
     pub fn with_added_expense(&self, expense: &Expense) -> Result<Group, GroupError> {
+        if !self.users_id.contains(&expense.creditor_id) {
+            return Err(GroupError::CreditorUnknown);
+        }
+
+        if !expense
+            .beneficiaries
+            .iter()
+            .all(|beneficiary| self.users_id.contains(&beneficiary.user_id))
+        {
+            return Err(GroupError::BeneficiaryUnknown);
+        }
+
         if expense.currency != self.currency {
             return Err(GroupError::WrongCurrency);
         }
