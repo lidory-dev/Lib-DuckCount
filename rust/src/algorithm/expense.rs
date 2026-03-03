@@ -106,7 +106,7 @@ impl Expense {
     /// let amount = "100.00";
     ///
     /// let beneficiaries = vec![
-    ///     Beneficiary::new(&alice_id, Some(String::from("50.0 0"))),
+    ///     Beneficiary::new(&alice_id, Some(String::from("50.00"))),
     ///     Beneficiary::new(&bob_id, None),
     /// ];
     ///
