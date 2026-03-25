@@ -2,7 +2,7 @@ use thiserror::Error;
 
 pub const CURRENCY_NAME_LENGHT: usize = 20;
 
-#[derive(PartialEq, Eq, Debug, Clone, uniffi::Record)]
+#[derive(PartialEq, Eq, Debug, Clone, uniffi::Object)]
 pub struct Currency {
     pub name: String,
     pub symbol: String,
