@@ -309,3 +309,100 @@ impl Expense {
         Ok(share.to_plain_string())
     }
 }
+
+/// Checks if an expense is valid.
+///
+/// This function tries to validate an expense with the given total amount, currency, and list of beneficiaries.
+/// It validates the inputs and calculates the total share amount and the number of beneficiaries without a specified share by iterating
+/// through the beneficiaries.
+///
+/// # Arguments
+///
+/// * `amount` - The total amount of the expense.
+/// * `currency` - The currency in which the expense is made.
+/// * `beneficiaries` - A list of beneficiaries who share this expense.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// - The expense amount is not greater than zero.
+/// - There are no beneficiaries.
+/// - The sum of the shares exceeds the total expense amount.
+/// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
+/// - Any share amount is not positive.
+/// - The expense amount or any share uses subunits, but the currency does not support fractional amounts.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::validate_expense};
+/// use uuid::Uuid;
+///
+/// let alice_id = Uuid::new_v4().to_string();
+/// let bob_id = Uuid::new_v4().to_string();
+/// let creditor_id = Uuid::new_v4().to_string();
+///
+/// let amount = "100.00";
+///
+/// let beneficiaries = vec![
+///     Beneficiary::new(&alice_id, Some(String::from("50.00"))),
+///     Beneficiary::new(&bob_id, None),
+/// ];
+///
+/// let currency = Currency::new("Euro", "€", true).unwrap();
+/// let expense = validate_expense(amount, &currency, beneficiaries);
+/// ```
+#[uniffi::export]
+pub fn validate_expense(
+    amount: &str,
+    currency: &Currency,
+    beneficiaries: Vec<Beneficiary>,
+) -> Result<(), ExpenseError> {
+    let amount = BigDecimal::from_str(&amount).map_err(|_| ExpenseError::MalformedAmount)?;
+
+    if amount <= BigDecimal::zero() {
+        return Err(ExpenseError::NonPositiveAmount);
+    }
+
+    if !currency.has_sub_unit && amount.fractional_digit_count() > 0 {
+        return Err(ExpenseError::UnsupportedSubunits);
+    }
+
+    if beneficiaries.is_empty() {
+        return Err(ExpenseError::NoBeneficiaries);
+    }
+
+    let mut total_share_amount = BigDecimal::zero();
+    let mut number_of_beneficiaries_without_share = BigDecimal::zero();
+
+    for beneficiary in &beneficiaries {
+        if let Some(share_amount) = &beneficiary.share {
+            let share_amount =
+                BigDecimal::from_str(&share_amount).map_err(|_| ExpenseError::MalformedAmount)?;
+
+            if share_amount <= BigDecimal::zero() {
+                return Err(ExpenseError::NonPositiveShare);
+            }
+
+            if !currency.has_sub_unit && share_amount.fractional_digit_count() > 0 {
+                return Err(ExpenseError::UnsupportedSubunits);
+            }
+
+            total_share_amount += share_amount;
+        } else {
+            number_of_beneficiaries_without_share += 1;
+        }
+    }
+
+    if total_share_amount > amount {
+        return Err(ExpenseError::SharesExceedTotalAmount);
+    }
+
+    if number_of_beneficiaries_without_share == BigDecimal::zero() && total_share_amount < amount {
+        return Err(ExpenseError::SharesBelowTotalAmount);
+    }
+
+    Ok(())
+}
