@@ -20,6 +20,7 @@ pub enum CurrencyError {
     SymbolLengthInvalid,
 }
 
+#[uniffi::export]
 impl Currency {
     /// Creates a new [Currency].
     ///
@@ -38,6 +39,7 @@ impl Currency {
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
     /// ```
+    #[uniffi::constructor]
     pub fn new(name: &str, symbol: &str, has_sub_unit: bool) -> Result<Self, CurrencyError> {
         if !(1..CURRENCY_NAME_LENGHT + 1).contains(&name.chars().count()) {
             return Err(CurrencyError::NameLengthInvalid);
