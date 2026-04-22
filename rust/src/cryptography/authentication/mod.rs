@@ -30,6 +30,8 @@ pub enum AuthenticationError {
     StartingLoginFailed,
     ClientLoginStateDeserializationFailed,
     ClientLoginFinalizationFailed(String),
+    MutexAcquisitionFailed,
+    FinishCalledBeforeStart,
 }
 
 impl Display for AuthenticationError {
@@ -53,6 +55,15 @@ impl Display for AuthenticationError {
             }
             AuthenticationError::ClientLoginFinalizationFailed(error) => {
                 write!(f, "Could not finish login: {}", error)
+            }
+            AuthenticationError::MutexAcquisitionFailed => {
+                write!(f, "Mutex acquisition failed.")
+            }
+            AuthenticationError::FinishCalledBeforeStart => {
+                write!(
+                    f,
+                    "finish() was called before start(). No session state is available."
+                )
             }
         }
     }
