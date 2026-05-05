@@ -15,10 +15,9 @@ bigdecimal = "0.4.10"   # MIT OR Apache-2.0
 # Cryptography
 rand = "0.8.5" # MIT OR Apache-2.0
 argon2 = "0.5.3" # MIT OR Apache-2.0
-opaque-ke = { version = "4.1.0-pre.1", features = [
+opaque-ke = { version = "3.0.0", features = [
     "argon2",
     "ristretto255",
-    "kem",
 ] } # MIT OR Apache-2.0
 aes-gcm = "0.10.3" # Apache-2.0 OR MIT
 aes-siv = "0.7.0" # Apache-2.0 OR MIT

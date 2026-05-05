@@ -83,8 +83,6 @@ impl Login {
             .lock()
             .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
 
-        let mut rng = OsRng;
-
         if state.is_empty() {
             return Err(AuthenticationError::FinishCalledBeforeStart);
         }
@@ -94,7 +92,6 @@ impl Login {
 
         let client_login_finish = client_login
             .finish(
-                &mut rng,
                 password.as_bytes(),
                 CredentialResponse::deserialize(credential_response_bytes).unwrap(),
                 ClientLoginFinishParameters::default(),
