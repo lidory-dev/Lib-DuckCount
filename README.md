@@ -34,16 +34,13 @@ use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, exp
 use uuid::Uuid;
 
 fn main() {
-    let currency = Currency::new("Euro", "€", true).unwrap();
-    let group = Group::new(&currency);
-
     let alice_id = Uuid::new_v4().to_string();
     let bob_id = Uuid::new_v4().to_string();
     let charlie_id = Uuid::new_v4().to_string();
 
-    let group = group.with_added_user(&alice_id);
-    let group = group.with_added_user(&bob_id);
-    let group = group.with_added_user(&charlie_id);
+    let currency = Currency::new("Euro", "€", true).unwrap();
+    let users_id = vec![alice_id.clone(), bob_id.clone(), charlie_id.clone()];
+    let group = Group::new(&currency, &users_id);
 
     let beneficiaries = vec![
         Beneficiary::new(&bob_id, Some(String::from("50.0"))),

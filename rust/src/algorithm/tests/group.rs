@@ -13,16 +13,21 @@ mod tests {
 
     #[test]
     fn test_group_new() {
+        let alice_id = Uuid::new_v4().to_string();
+        let bob_id = Uuid::new_v4().to_string();
+
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
-        assert!(group.users_id.is_empty());
+        let users_id = vec![alice_id.clone(), bob_id.clone()];
+        let group = Group::new(&currency, &users_id);
+
+        assert_eq!(group.users_id.len(), 2);
         assert!(group.expenses.is_empty());
     }
 
     #[test]
     fn test_add_user() {
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
+        let group = Group::new(&currency, &vec![]);
         let user_id = Uuid::new_v4().to_string();
 
         let group = group.with_added_user(&user_id);
@@ -33,14 +38,12 @@ mod tests {
 
     #[test]
     fn test_add_expense() {
-        let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
-
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&alice_id);
-        let group = group.with_added_user(&bob_id);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![alice_id.clone(), bob_id.clone()];
+        let group = Group::new(&currency, &users_id);
 
         let amount = "100.00";
         let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
@@ -53,11 +56,12 @@ mod tests {
 
     #[test]
     fn test_add_expense_creditor_unknown() {
-        let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
-
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
+
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![bob_id.clone()];
+        let group = Group::new(&currency, &users_id);
 
         let group = group.with_added_user(&bob_id);
 
@@ -72,13 +76,12 @@ mod tests {
 
     #[test]
     fn test_add_expense_beneficiary_unknown() {
-        let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
-
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&alice_id);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![alice_id.clone()];
+        let group = Group::new(&currency, &users_id);
 
         let amount = "100.00";
         let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
@@ -91,14 +94,12 @@ mod tests {
 
     #[test]
     fn test_add_expense_wrong_currency() {
-        let group_currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&group_currency);
-
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&alice_id);
-        let group = group.with_added_user(&bob_id);
+        let group_currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![alice_id.clone(), bob_id.clone()];
+        let group = Group::new(&group_currency, &users_id);
 
         let amount = "100.00";
         let beneficiaries = vec![Beneficiary::new(&bob_id, Some(String::from("100.00")))];
@@ -113,15 +114,13 @@ mod tests {
 
     #[test]
     fn test_calculate_net_debts_per_user() {
-        let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&alice_id);
-        let group = group.with_added_user(&bob_id);
-        let group = group.with_added_user(&charlie_id);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![alice_id.clone(), bob_id.clone(), charlie_id.clone()];
+        let group = Group::new(&currency, &users_id);
 
         let beneficiaries = vec![
             Beneficiary::new(&bob_id, Some(String::from("50.00"))),
@@ -149,15 +148,13 @@ mod tests {
 
     #[test]
     fn test_calculate_transactions_to_equilibrate() {
-        let currency = Currency::new("Euro", "€", true).unwrap();
-        let group = Group::new(&currency);
         let alice_id = Uuid::new_v4().to_string();
         let bob_id = Uuid::new_v4().to_string();
         let charlie_id = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&alice_id);
-        let group = group.with_added_user(&bob_id);
-        let group = group.with_added_user(&charlie_id);
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let users_id = vec![alice_id.clone(), bob_id.clone(), charlie_id.clone()];
+        let group = Group::new(&currency, &users_id);
 
         let beneficiaries = vec![
             Beneficiary::new(&bob_id, Some(String::from("50.00"))),
