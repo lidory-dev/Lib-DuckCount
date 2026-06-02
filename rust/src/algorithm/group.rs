@@ -2,6 +2,7 @@ use std::{
     collections::{BinaryHeap, HashMap},
     ops::Deref,
     str::FromStr,
+    sync::Arc,
 };
 use thiserror::Error;
 
@@ -40,7 +41,7 @@ pub struct Group {
     /// A list of user IDs in the group.
     pub users_id: Vec<String>,
     /// A list of expenses associated with the group.
-    pub expenses: Vec<Expense>,
+    pub expenses: Vec<Arc<Expense>>,
 }
 
 #[uniffi::export]
@@ -51,6 +52,7 @@ impl Group {
     ///
     /// * `currency` - A reference to a [Currency] object, which defines the currency used for all expenses within the group.
     /// * `users_id` - A reference to a list of string representing the unique identifier of the users that are part of the group.
+    /// * `expenses` - A reference to a list of [Expense] that should be added to the group.
     ///
     /// # Examples
     ///
@@ -66,15 +68,23 @@ impl Group {
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
     /// let users_id = vec![alice_id, bob_id];
-    /// let mut group = Group::new(&currency, &users_id);
+    /// let mut group = Group::new(&currency, &users_id, &vec![]);
     /// ```
     #[uniffi::constructor]
-    pub fn new(currency: &Currency, users_id: &Vec<String>) -> Self {
-        Self {
+    pub fn new(
+        currency: &Currency,
+        users_id: &Vec<String>,
+        expenses: &Vec<Arc<Expense>>,
+    ) -> Result<Self, GroupError> {
+        for expense in expenses {
+            Group::check_expense(users_id, currency, expense)?;
+        }
+
+        Ok(Self {
             currency: currency.to_owned(),
             users_id: users_id.to_owned(),
-            expenses: Vec::new(),
-        }
+            expenses: expenses.to_owned(),
+        })
     }
 
     /// Adds a user to the group and returns a new `Group` instance with the user added.
@@ -98,7 +108,7 @@ impl Group {
     /// # use uuid::Uuid;
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let mut group = Group::new(&currency, &vec![]);
+    /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
     /// let user_id = Uuid::new_v4().to_string();
     /// group.with_added_user(&user_id);
@@ -126,10 +136,11 @@ impl Group {
     ///
     /// ```rust
     /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
+    /// # use std::sync::Arc;
     /// # use uuid::Uuid;
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let mut group = Group::new(&currency, &vec![]);
+    /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
     /// let creditor_id = Uuid::new_v4().to_string();
     /// let alice_id = Uuid::new_v4().to_string();
@@ -139,28 +150,14 @@ impl Group {
     /// ];
     ///
     /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
-    /// group.with_added_expense(&expense);
+    /// group.with_added_expense(Arc::new(expense));
     /// ```
-    pub fn with_added_expense(&self, expense: &Expense) -> Result<Group, GroupError> {
-        if !self.users_id.contains(&expense.creditor_id) {
-            return Err(GroupError::CreditorUnknown);
-        }
-
-        if !expense
-            .beneficiaries
-            .iter()
-            .all(|beneficiary| self.users_id.contains(&beneficiary.user_id))
-        {
-            return Err(GroupError::BeneficiaryUnknown);
-        }
-
-        if expense.currency != self.currency {
-            return Err(GroupError::WrongCurrency);
-        }
+    pub fn with_added_expense(&self, expense: Arc<Expense>) -> Result<Group, GroupError> {
+        Group::check_expense(&self.users_id, &self.currency, &expense)?;
 
         let mut new_group = self.clone();
 
-        new_group.expenses.push(expense.clone());
+        new_group.expenses.push(expense);
 
         Ok(new_group)
     }
@@ -185,7 +182,7 @@ impl Group {
     /// # use lib_duckcount::algorithm::{currency::Currency, group::Group};
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let mut group = Group::new(&currency, &vec![]);
+    /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
     /// let net_debts = group.calculate_net_debts_per_user().unwrap();
     /// for (user_id, debt) in net_debts {
@@ -282,7 +279,7 @@ impl Group {
     /// # use lib_duckcount::algorithm::{currency::Currency, group::Group};
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let mut group = Group::new(&currency, &vec![]);
+    /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
     /// let transactions = group.calculate_transactions_to_equilibrate().unwrap();
     /// for transaction in transactions {
@@ -344,5 +341,69 @@ impl Group {
         }
 
         Ok(result)
+    }
+}
+
+impl Group {
+    /// Checks whether an [Expense] is compatible with a group.
+    ///
+    /// This function validates that the given expense can be added to a group composed of `users_id`
+    /// and using `currency`. It ensures that the creditor and every beneficiary of the expense are
+    /// part of the group, and that the expense uses the same currency as the group.
+    ///
+    /// # Arguments
+    ///
+    /// * `users_id` - A reference to a list of string representing the unique identifier of the users that are part of the group.
+    /// * `currency` - A reference to the [Currency] used by the group.
+    /// * `expense` - A reference to the [Expense] to validate.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - The creditor of the expense is not part of the group.
+    /// - At least one of the beneficiaries of the expense is not part of the group.
+    /// - The expense does not use the same currency as the group.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```rust
+    /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
+    /// # use uuid::Uuid;
+    ///
+    /// let creditor_id = Uuid::new_v4().to_string();
+    /// let alice_id = Uuid::new_v4().to_string();
+    ///
+    /// let currency = Currency::new("Euro", "€", true).unwrap();
+    /// let users_id = vec![creditor_id.clone(), alice_id.clone()];
+    ///
+    /// let beneficiaries = vec![Beneficiary::new(&alice_id, None)];
+    /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
+    ///
+    /// Group::check_expense(&users_id, &currency, &expense).unwrap();
+    /// ```
+    pub fn check_expense(
+        users_id: &Vec<String>,
+        currency: &Currency,
+        expense: &Expense,
+    ) -> Result<(), GroupError> {
+        if !users_id.contains(&expense.creditor_id) {
+            return Err(GroupError::CreditorUnknown);
+        }
+
+        if !expense
+            .beneficiaries
+            .iter()
+            .all(|beneficiary| users_id.contains(&beneficiary.user_id))
+        {
+            return Err(GroupError::BeneficiaryUnknown);
+        }
+
+        if expense.currency != *currency {
+            return Err(GroupError::WrongCurrency);
+        }
+
+        Ok(())
     }
 }

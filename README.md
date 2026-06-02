@@ -31,6 +31,7 @@ A Rust library for **shared expense management** and **secure cryptographic util
 
 ```rust
 use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
+use std::sync::Arc;
 use uuid::Uuid;
 
 fn main() {
@@ -40,7 +41,7 @@ fn main() {
 
     let currency = Currency::new("Euro", "€", true).unwrap();
     let users_id = vec![alice_id.clone(), bob_id.clone(), charlie_id.clone()];
-    let group = Group::new(&currency, &users_id);
+    let group = Group::new(&currency, &users_id, &vec![]).unwrap();
 
     let beneficiaries = vec![
         Beneficiary::new(&bob_id, Some(String::from("50.0"))),
@@ -48,7 +49,7 @@ fn main() {
     ];
 
     let expense = Expense::new(&alice_id, "100.0", &currency, beneficiaries).unwrap();
-    let group = group.with_added_expense(&expense).unwrap();
+    let group = group.with_added_expense(Arc::new(expense)).unwrap();
 
     let net_debts = group.calculate_net_debts_per_user().unwrap();
     for (user_id, debt) in net_debts {
