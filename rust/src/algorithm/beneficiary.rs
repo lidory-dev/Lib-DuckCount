@@ -6,11 +6,9 @@
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Beneficiary {
     /// The ID of the user who is a beneficiary.
-    pub user_id: String,
-    /// An optional field representing the share of the expense attributed to the beneficiary.
-    /// If `None`, the share is calculated equally among all beneficiaries without an explicit share.
-    #[uniffi(default = None)]
-    pub share: Option<String>,
+    pub user_uuid: String,
+    /// The share of the expense attributed to the beneficiary.
+    pub share: String,
 }
 
 impl Beneficiary {
@@ -20,35 +18,24 @@ impl Beneficiary {
     ///
     /// # Arguments
     ///
-    /// * `user_id` - The ID of the user who is a beneficiary.
-    /// * `share` - An optional field representing the share of the expense attributed to the beneficiary.
+    /// * `user_uuid` - The ID of the user who is a beneficiary.
+    /// * `share` - A string representing the share of the expense attributed to the beneficiary.
     ///
     /// # Examples
     ///
     /// Basic usage:
     ///
     /// ```rust
-    /// use lib_duckcount::algorithm::beneficiary::Beneficiary;
-    /// use uuid::Uuid;
+    /// # use lib_duckcount::algorithm::beneficiary::Beneficiary;
+    /// # use uuid::Uuid;
     ///
-    /// let user_id = Uuid::new_v4().to_string();
-    /// let share = Some(String::from("50.0"));
-    /// let beneficiary = Beneficiary::new(&user_id, share);
+    /// let user_uuid = Uuid::new_v4().to_string();
+    /// let beneficiary = Beneficiary::new(&user_uuid, "50.00");
     /// ```
-    ///
-    /// Example with no specified share:
-    ///
-    /// ```rust
-    /// use lib_duckcount::algorithm::beneficiary::Beneficiary;
-    /// use uuid::Uuid;
-    ///
-    /// let user_id = Uuid::new_v4().to_string();
-    /// let beneficiary = Beneficiary::new(&user_id, None);
-    /// ```
-    pub fn new(user_id: &str, share: Option<String>) -> Self {
+    pub fn new(user_uuid: &str, share: &str) -> Self {
         Self {
-            user_id: user_id.to_string(),
-            share,
+            user_uuid: user_uuid.to_string(),
+            share: share.to_string(),
         }
     }
 }

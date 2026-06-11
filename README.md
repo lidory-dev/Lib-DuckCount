@@ -30,30 +30,37 @@ A Rust library for **shared expense management** and **secure cryptographic util
 ### Expense Management Example
 
 ```rust
-use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
-use std::sync::Arc;
+use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::{Expense, compute_beneficiaries}, group::Group};
+
+use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 fn main() {
-    let alice_id = Uuid::new_v4().to_string();
-    let bob_id = Uuid::new_v4().to_string();
-    let charlie_id = Uuid::new_v4().to_string();
+    let alice_uuid = Uuid::new_v4().to_string();
+    let bob_uuid = Uuid::new_v4().to_string();
+    let charlie_uuid = Uuid::new_v4().to_string();
 
     let currency = Currency::new("Euro", "€", true).unwrap();
-    let users_id = vec![alice_id.clone(), bob_id.clone(), charlie_id.clone()];
-    let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+    let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
+    let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
-    let beneficiaries = vec![
-        Beneficiary::new(&bob_id, Some(String::from("50.0"))),
-        Beneficiary::new(&charlie_id, None),
-    ];
+    let amount = "100.00";
+    
+    let beneficiary_uuids = vec![bob_uuid.clone(), charlie_uuid.clone()];
+    
+    let mut fixed_shares = HashMap::new();
+    fixed_shares.insert(bob_uuid.clone(), String::from("50.00"));
+    
+    let beneficiaries =
+        compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares)
+            .unwrap();
 
-    let expense = Expense::new(&alice_id, "100.0", &currency, beneficiaries).unwrap();
+    let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
     let group = group.with_added_expense(Arc::new(expense)).unwrap();
 
     let net_debts = group.calculate_net_debts_per_user().unwrap();
-    for (user_id, debt) in net_debts {
-        println!("User {} has a net debt of {:.2}", user_id, debt);
+    for (user_uuid, debt) in net_debts {
+        println!("User {} has a net debt of {:.2}", user_uuid, debt);
     }
 
     let transactions = group.calculate_transactions_to_equilibrate().unwrap();

@@ -135,21 +135,28 @@ impl Group {
     /// A new `Group` instance containing all existing expenses plus the newly added expense.
     ///
     /// ```rust
-    /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
-    /// # use std::sync::Arc;
+    /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::{Expense, compute_beneficiaries}, group::Group};
+    /// # use std::{collections::HashMap, sync::Arc};
     /// # use uuid::Uuid;
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
     /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
-    /// let creditor_id = Uuid::new_v4().to_string();
-    /// let alice_id = Uuid::new_v4().to_string();
+    /// let creditor_uuid = Uuid::new_v4().to_string();
+    /// let alice_uuid = Uuid::new_v4().to_string();
     ///
-    /// let beneficiaries = vec![
-    ///     Beneficiary::new(&alice_id, None),
-    /// ];
+    /// let amount = "100.00";
     ///
-    /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
+    /// let beneficiary_uuids = vec![alice_uuid.clone()];
+    ///
+    /// let mut fixed_shares = HashMap::new();
+    /// fixed_shares.insert(alice_uuid.clone(), String::from("100.00"));
+    ///
+    /// let beneficiaries =
+    ///     compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares)
+    ///         .unwrap();
+    ///
+    /// let expense = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
     /// group.with_added_expense(Arc::new(expense));
     /// ```
     pub fn with_added_expense(&self, expense: Arc<Expense>) -> Result<Group, GroupError> {
@@ -193,14 +200,14 @@ impl Group {
     /// Example with specific users and expenses:
     ///
     /// Suppose we have the following users and expenses:
-    /// - Alice: Creditor for an expense of 100.0
+    /// - Alice: Creditor for an expense of 100.00
     /// - Bob: Beneficiary for the same expense with an equal share
     /// - Charlie: Beneficiary for the same expense with an equal share
     ///
     /// The function will return a HashMap containing net debts such as:
-    /// - Alice: 100.0 (owed this amount)
-    /// - Bob: -50.0 (owes this amount)
-    /// - Charlie: -50.0 (owes this amount)
+    /// - Alice: 100.00 (owed this amount)
+    /// - Bob: -50.00 (owes this amount)
+    /// - Charlie: -50.00 (owes this amount)
     ///
     /// This ensures that the net debts are calculated correctly and reflect each user's financial standing.
     pub fn calculate_net_debts_per_user(&self) -> Result<HashMap<String, String>, GroupError> {
@@ -223,34 +230,19 @@ impl Group {
 
             net_debts.insert(expense.creditor_id.clone(), net_debt.to_plain_string());
 
-            let equal_shares = expense
-                .calculate_equal_shares()
-                .map_err(|_| GroupError::MalformedAmount)?;
-
             for beneficiary in &expense.beneficiaries {
-                // TODO:
-                let beneficiary_share = if let Some(share) = beneficiary.share.clone() {
-                    share
-                } else if let Some(share) = equal_shares.get(&beneficiary.user_id) {
-                    share.to_owned()
-                } else {
-                    expense
-                        .calculate_equal_share()
-                        .map_err(|_| GroupError::MalformedAmount)?
-                };
-
                 let beneficiary_net_debt = net_debts
-                    .entry(beneficiary.user_id.clone())
+                    .entry(beneficiary.user_uuid.clone())
                     .or_insert(BigDecimal::zero().to_plain_string());
 
                 let mut beneficiary_net_debt = BigDecimal::from_str(&beneficiary_net_debt)
                     .map_err(|_| GroupError::MalformedAmount)?;
 
-                beneficiary_net_debt -= BigDecimal::from_str(&beneficiary_share)
+                beneficiary_net_debt -= BigDecimal::from_str(&beneficiary.share)
                     .map_err(|_| GroupError::MalformedAmount)?;
 
                 net_debts.insert(
-                    beneficiary.user_id.clone(),
+                    beneficiary.user_uuid.clone(),
                     beneficiary_net_debt.to_plain_string(),
                 );
             }
@@ -369,19 +361,27 @@ impl Group {
     /// Basic usage:
     ///
     /// ```rust
-    /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::Expense, group::Group};
+    /// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::{Expense, compute_beneficiaries}, group::Group};
     /// # use uuid::Uuid;
+    /// # use std::collections::HashMap;
     ///
-    /// let creditor_id = Uuid::new_v4().to_string();
-    /// let alice_id = Uuid::new_v4().to_string();
+    /// let creditor_uuid = Uuid::new_v4().to_string();
+    /// let alice_uuid = Uuid::new_v4().to_string();
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let users_id = vec![creditor_id.clone(), alice_id.clone()];
+    /// let users_uuid = vec![creditor_uuid.clone(), alice_uuid.clone()];
     ///
-    /// let beneficiaries = vec![Beneficiary::new(&alice_id, None)];
-    /// let expense = Expense::new(&creditor_id, "100.0", &currency, beneficiaries).unwrap();
+    /// let amount = "100.00";
     ///
-    /// Group::check_expense(&users_id, &currency, &expense).unwrap();
+    /// let beneficiary_uuids = vec![alice_uuid.clone()];
+    ///
+    /// let beneficiaries =
+    ///     compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new())
+    ///         .unwrap();
+    ///
+    /// let expense = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
+    ///
+    /// Group::check_expense(&users_uuid, &currency, &expense).unwrap();
     /// ```
     pub fn check_expense(
         users_id: &Vec<String>,
@@ -395,7 +395,7 @@ impl Group {
         if !expense
             .beneficiaries
             .iter()
-            .all(|beneficiary| users_id.contains(&beneficiary.user_id))
+            .all(|beneficiary| users_id.contains(&beneficiary.user_uuid))
         {
             return Err(GroupError::BeneficiaryUnknown);
         }
