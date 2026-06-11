@@ -53,7 +53,7 @@ pub enum ExpenseError {
 #[derive(Debug, Clone, uniffi::Object)]
 pub struct Expense {
     /// The ID of the creditor who made the expense.
-    pub creditor_id: String,
+    pub creditor_uuid: String,
     /// The total amount of the expense.
     pub amount: String,
     /// The currency in which the expense is made.
@@ -72,7 +72,7 @@ impl Expense {
     ///
     /// # Arguments
     ///
-    /// * `creditor_id` - The ID of the creditor who made the expense.
+    /// * `creditor_uuid` - The ID of the creditor who made the expense.
     /// * `amount` - The total amount of the expense.
     /// * `currency` - The currency in which the expense is made.
     /// * `beneficiaries` - A list of beneficiaries who share this expense.
@@ -118,7 +118,7 @@ impl Expense {
     /// ```
     #[uniffi::constructor]
     pub fn new(
-        creditor_id: &str,
+        creditor_uuid: &str,
         amount: &str,
         currency: &Currency,
         beneficiaries: &Vec<Beneficiary>,
@@ -163,7 +163,7 @@ impl Expense {
         }
 
         Ok(Expense {
-            creditor_id: creditor_id.to_string(),
+            creditor_uuid: creditor_uuid.to_string(),
             amount: amount.to_plain_string(),
             currency: currency.to_owned(),
             beneficiaries: beneficiaries.to_owned(),
@@ -172,7 +172,7 @@ impl Expense {
 
     pub fn copy(&self) -> Self {
         Expense {
-            creditor_id: self.creditor_id.clone(),
+            creditor_uuid: self.creditor_uuid.clone(),
             amount: self.amount.clone(),
             currency: self.currency.clone(),
             beneficiaries: self.beneficiaries.clone(),

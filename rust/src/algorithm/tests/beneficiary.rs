@@ -5,11 +5,11 @@ mod tests {
 
     #[test]
     fn test_beneficiary_new() {
-        let user_id = Uuid::new_v4().to_string();
+        let user_uuid = Uuid::new_v4().to_string();
         let share = "50.00";
-        let beneficiary = Beneficiary::new(&user_id, share);
+        let beneficiary = Beneficiary::new(&user_uuid, share);
 
-        assert_eq!(beneficiary.user_uuid, user_id);
+        assert_eq!(beneficiary.user_uuid, user_uuid);
         assert_eq!(beneficiary.share, share);
     }
 }

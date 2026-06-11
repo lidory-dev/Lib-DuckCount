@@ -65,7 +65,7 @@ fn main() {
 
     let transactions = group.calculate_transactions_to_equilibrate().unwrap();
     for transaction in transactions {
-        println!("{} owes {:.2} to {}", transaction.debtor_id, transaction.amount, transaction.creditor_id);
+        println!("{} owes {:.2} to {}", transaction.debtor_uuid, transaction.amount, transaction.creditor_uuid);
     }
 }
 ```

@@ -9,11 +9,11 @@ mod tests {
     #[test]
     fn test_debt_new() {
         let amount = BigDecimal::from_str("100.00").unwrap();
-        let user_id = Uuid::new_v4().to_string();
-        let debt = Debt::new(&amount, &user_id);
+        let user_uuid = Uuid::new_v4().to_string();
+        let debt = Debt::new(&amount, &user_uuid);
 
         assert_eq!(debt.amount, amount);
-        assert_eq!(debt.user_id, user_id);
+        assert_eq!(debt.user_uuid, user_uuid);
     }
 
     #[test]

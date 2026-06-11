@@ -13,14 +13,14 @@ mod tests {
 
     #[test]
     fn test_group_new() {
-        let alice_id = Uuid::new_v4().to_string();
-        let bob_id = Uuid::new_v4().to_string();
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_id.clone(), bob_id.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
-        assert_eq!(group.users_id.len(), 2);
+        assert_eq!(group.users_uuid.len(), 2);
         assert!(group.expenses.is_empty());
     }
 
@@ -28,26 +28,26 @@ mod tests {
     fn test_add_user() {
         let currency = Currency::new("Euro", "€", true).unwrap();
         let group = Group::new(&currency, &vec![], &vec![]).unwrap();
-        let user_id = Uuid::new_v4().to_string();
+        let user_uuid = Uuid::new_v4().to_string();
 
-        let group = group.with_added_user(&user_id);
+        let group = group.with_added_user(&user_uuid);
 
-        assert_eq!(group.users_id.len(), 1);
-        assert_eq!(group.users_id[0], user_id);
+        assert_eq!(group.users_uuid.len(), 1);
+        assert_eq!(group.users_uuid[0], user_uuid);
     }
 
     #[test]
     fn test_add_expense() {
-        let alice_id = Uuid::new_v4().to_string();
-        let bob_id = Uuid::new_v4().to_string();
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_id.clone(), bob_id.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(&bob_id, "100.00")];
-        let expense = Expense::new(&alice_id, amount, &currency, &beneficiaries).unwrap();
+        let beneficiaries = vec![Beneficiary::new(&bob_uuid, "100.00")];
+        let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
 
         let group = group.with_added_expense(Arc::new(expense)).unwrap();
 
@@ -56,18 +56,18 @@ mod tests {
 
     #[test]
     fn test_add_expense_creditor_unknown() {
-        let alice_id = Uuid::new_v4().to_string();
-        let bob_id = Uuid::new_v4().to_string();
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![bob_id.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![bob_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
-        let group = group.with_added_user(&bob_id);
+        let group = group.with_added_user(&bob_uuid);
 
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(&bob_id, "100.00")];
-        let expense = Expense::new(&alice_id, amount, &currency, &beneficiaries).unwrap();
+        let beneficiaries = vec![Beneficiary::new(&bob_uuid, "100.00")];
+        let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
 
         let group_result = group.with_added_expense(Arc::new(expense)).unwrap_err();
 
@@ -76,16 +76,16 @@ mod tests {
 
     #[test]
     fn test_add_expense_beneficiary_unknown() {
-        let alice_id = Uuid::new_v4().to_string();
-        let bob_id = Uuid::new_v4().to_string();
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_id.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(&bob_id, "100.00")];
-        let expense = Expense::new(&alice_id, amount, &currency, &beneficiaries).unwrap();
+        let beneficiaries = vec![Beneficiary::new(&bob_uuid, "100.00")];
+        let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
 
         let group_result = group.with_added_expense(Arc::new(expense)).unwrap_err();
 
@@ -94,18 +94,18 @@ mod tests {
 
     #[test]
     fn test_add_expense_wrong_currency() {
-        let alice_id = Uuid::new_v4().to_string();
-        let bob_id = Uuid::new_v4().to_string();
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
 
         let group_currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_id.clone(), bob_id.clone()];
-        let group = Group::new(&group_currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone()];
+        let group = Group::new(&group_currency, &users_uuid, &vec![]).unwrap();
 
         let amount = "100.00";
-        let beneficiaries = vec![Beneficiary::new(&bob_id, "100.00")];
+        let beneficiaries = vec![Beneficiary::new(&bob_uuid, "100.00")];
 
         let expense_currency = Currency::new("Dollar", "$", true).unwrap();
-        let expense = Expense::new(&alice_id, amount, &expense_currency, &beneficiaries).unwrap();
+        let expense = Expense::new(&alice_uuid, amount, &expense_currency, &beneficiaries).unwrap();
 
         let group_error = group.with_added_expense(Arc::new(expense)).unwrap_err();
 
@@ -119,8 +119,8 @@ mod tests {
         let charlie_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
         let amount = "100.00";
 
@@ -158,8 +158,8 @@ mod tests {
         let charlie_uuid = Uuid::new_v4().to_string();
 
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let users_id = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
-        let group = Group::new(&currency, &users_id, &vec![]).unwrap();
+        let users_uuid = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
+        let group = Group::new(&currency, &users_uuid, &vec![]).unwrap();
 
         let amount = "100.00";
 

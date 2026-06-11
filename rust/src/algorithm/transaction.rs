@@ -5,9 +5,9 @@
 #[derive(Debug, uniffi::Record)]
 pub struct Transaction {
     /// The ID of the debtor who owes money.
-    pub debtor_id: String,
+    pub debtor_uuid: String,
     /// The ID of the creditor who is owed money.
-    pub creditor_id: String,
+    pub creditor_uuid: String,
     /// The amount of money involved in the transaction.
     pub amount: String,
 }
@@ -19,8 +19,8 @@ impl Transaction {
     ///
     /// # Arguments
     ///
-    /// * `debtor_id` - The ID of the debtor who owes money.
-    /// * `creditor_id` - The ID of the creditor who is owed money.
+    /// * `debtor_uuid` - The ID of the debtor who owes money.
+    /// * `creditor_uuid` - The ID of the creditor who is owed money.
     /// * `amount` - The amount of money involved in the transaction.
     ///
     /// # Examples
@@ -31,16 +31,16 @@ impl Transaction {
     /// use lib_duckcount::algorithm::transaction::Transaction;
     /// use uuid::Uuid;
     ///
-    /// let debtor_id = Uuid::new_v4().to_string();
-    /// let creditor_id = Uuid::new_v4().to_string();
+    /// let debtor_uuid = Uuid::new_v4().to_string();
+    /// let creditor_uuid = Uuid::new_v4().to_string();
     /// let amount = "50.0";
     ///
-    /// let transaction = Transaction::new(&debtor_id, &creditor_id, amount);
+    /// let transaction = Transaction::new(&debtor_uuid, &creditor_uuid, amount);
     /// ```
-    pub fn new(debtor_id: &str, creditor_id: &str, amount: &str) -> Self {
+    pub fn new(debtor_uuid: &str, creditor_uuid: &str, amount: &str) -> Self {
         Self {
-            debtor_id: debtor_id.to_string(),
-            creditor_id: creditor_id.to_string(),
+            debtor_uuid: debtor_uuid.to_owned(),
+            creditor_uuid: creditor_uuid.to_owned(),
             amount: amount.to_owned(),
         }
     }

@@ -39,7 +39,7 @@ pub struct Group {
     /// The currency used by the group.
     pub currency: Currency,
     /// A list of user IDs in the group.
-    pub users_id: Vec<String>,
+    pub users_uuid: Vec<String>,
     /// A list of expenses associated with the group.
     pub expenses: Vec<Arc<Expense>>,
 }
@@ -51,7 +51,7 @@ impl Group {
     /// # Arguments
     ///
     /// * `currency` - A reference to a [Currency] object, which defines the currency used for all expenses within the group.
-    /// * `users_id` - A reference to a list of string representing the unique identifier of the users that are part of the group.
+    /// * `users_uuid` - A reference to a list of string representing the unique identifier of the users that are part of the group.
     /// * `expenses` - A reference to a list of [Expense] that should be added to the group.
     ///
     /// # Examples
@@ -63,38 +63,38 @@ impl Group {
     /// # use lib_duckcount::algorithm::group::Group;
     /// # use uuid::Uuid;
     ///
-    /// let alice_id = Uuid::new_v4().to_string();
-    /// let bob_id = Uuid::new_v4().to_string();
+    /// let alice_uuid = Uuid::new_v4().to_string();
+    /// let bob_uuid = Uuid::new_v4().to_string();
     ///
     /// let currency = Currency::new("Euro", "€", true).unwrap();
-    /// let users_id = vec![alice_id, bob_id];
-    /// let mut group = Group::new(&currency, &users_id, &vec![]);
+    /// let users_uuid = vec![alice_uuid, bob_uuid];
+    /// let mut group = Group::new(&currency, &users_uuid, &vec![]);
     /// ```
     #[uniffi::constructor]
     pub fn new(
         currency: &Currency,
-        users_id: &Vec<String>,
+        users_uuid: &Vec<String>,
         expenses: &Vec<Arc<Expense>>,
     ) -> Result<Self, GroupError> {
         for expense in expenses {
-            Group::check_expense(users_id, currency, expense)?;
+            Group::check_expense(users_uuid, currency, expense)?;
         }
 
         Ok(Self {
             currency: currency.to_owned(),
-            users_id: users_id.to_owned(),
+            users_uuid: users_uuid.to_owned(),
             expenses: expenses.to_owned(),
         })
     }
 
     /// Adds a user to the group and returns a new `Group` instance with the user added.
     ///
-    /// This method creates a copy of the current group, appends the provided `user_id` to the list of users,
+    /// This method creates a copy of the current group, appends the provided `user_uuid` to the list of users,
     /// and returns the new group. The original group remains unchanged.
     ///
     /// # Arguments
     ///
-    /// * `user_id` - A string slice representing the unique identifier of the user to add.
+    /// * `user_uuid` - A string slice representing the unique identifier of the user to add.
     ///
     /// # Returns
     ///
@@ -110,13 +110,13 @@ impl Group {
     /// let currency = Currency::new("Euro", "€", true).unwrap();
     /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
-    /// let user_id = Uuid::new_v4().to_string();
-    /// group.with_added_user(&user_id);
+    /// let user_uuid = Uuid::new_v4().to_string();
+    /// group.with_added_user(&user_uuid);
     /// ```
-    pub fn with_added_user(&self, user_id: &str) -> Group {
+    pub fn with_added_user(&self, user_uuid: &str) -> Group {
         let mut new_group = self.clone();
 
-        new_group.users_id.push(user_id.to_string());
+        new_group.users_uuid.push(user_uuid.to_string());
 
         new_group
     }
@@ -160,7 +160,7 @@ impl Group {
     /// group.with_added_expense(Arc::new(expense));
     /// ```
     pub fn with_added_expense(&self, expense: Arc<Expense>) -> Result<Group, GroupError> {
-        Group::check_expense(&self.users_id, &self.currency, &expense)?;
+        Group::check_expense(&self.users_uuid, &self.currency, &expense)?;
 
         let mut new_group = self.clone();
 
@@ -192,8 +192,8 @@ impl Group {
     /// let mut group = Group::new(&currency, &vec![], &vec![]).unwrap();
     ///
     /// let net_debts = group.calculate_net_debts_per_user().unwrap();
-    /// for (user_id, debt) in net_debts {
-    ///     println!("User {} has a net debt of {:.2}", user_id, debt);
+    /// for (user_uuid, debt) in net_debts {
+    ///     println!("User {} has a net debt of {:.2}", user_uuid, debt);
     /// }
     /// ```
     ///
@@ -213,13 +213,13 @@ impl Group {
     pub fn calculate_net_debts_per_user(&self) -> Result<HashMap<String, String>, GroupError> {
         let mut net_debts = HashMap::new();
 
-        for user_id in self.users_id.deref() {
-            net_debts.insert(user_id.clone(), BigDecimal::zero().to_plain_string());
+        for user_uuid in self.users_uuid.deref() {
+            net_debts.insert(user_uuid.clone(), BigDecimal::zero().to_plain_string());
         }
 
         for expense in self.expenses.deref() {
             let net_debt = net_debts
-                .entry(expense.creditor_id.clone())
+                .entry(expense.creditor_uuid.clone())
                 .or_insert(BigDecimal::zero().to_plain_string());
 
             let mut net_debt =
@@ -228,7 +228,7 @@ impl Group {
             net_debt +=
                 BigDecimal::from_str(&expense.amount).map_err(|_| GroupError::MalformedAmount)?;
 
-            net_debts.insert(expense.creditor_id.clone(), net_debt.to_plain_string());
+            net_debts.insert(expense.creditor_uuid.clone(), net_debt.to_plain_string());
 
             for beneficiary in &expense.beneficiaries {
                 let beneficiary_net_debt = net_debts
@@ -275,7 +275,7 @@ impl Group {
     ///
     /// let transactions = group.calculate_transactions_to_equilibrate().unwrap();
     /// for transaction in transactions {
-    ///     println!("{} owes {} to {}", transaction.debtor_id, transaction.amount, transaction.creditor_id);
+    ///     println!("{} owes {} to {}", transaction.debtor_uuid, transaction.amount, transaction.creditor_uuid);
     /// }
     /// ```
     ///
@@ -299,13 +299,13 @@ impl Group {
         let mut debtors = BinaryHeap::new();
         let mut creditors = BinaryHeap::new();
 
-        for (user_id, debt) in debts {
+        for (user_uuid, debt) in debts {
             let debt = BigDecimal::from_str(&debt).map_err(|_| GroupError::MalformedAmount)?;
 
             if debt < BigDecimal::zero() {
-                debtors.push(Debt::new(&-debt, &user_id));
+                debtors.push(Debt::new(&-debt, &user_uuid));
             } else if debt > BigDecimal::zero() {
-                creditors.push(Debt::new(&debt, &user_id));
+                creditors.push(Debt::new(&debt, &user_uuid));
             }
         }
 
@@ -315,8 +315,8 @@ impl Group {
             let transfer_amount = debtor.amount.clone().min(creditor.amount.clone());
 
             result.push(Transaction::new(
-                &debtor.user_id,
-                &creditor.user_id,
+                &debtor.user_uuid,
+                &creditor.user_uuid,
                 &transfer_amount.to_plain_string(),
             ));
 
@@ -324,11 +324,11 @@ impl Group {
             let remaining_credit = creditor.amount - transfer_amount;
 
             if remaining_debt > BigDecimal::zero() {
-                debtors.push(Debt::new(&remaining_debt, &debtor.user_id));
+                debtors.push(Debt::new(&remaining_debt, &debtor.user_uuid));
             }
 
             if remaining_credit > BigDecimal::zero() {
-                creditors.push(Debt::new(&remaining_credit, &creditor.user_id));
+                creditors.push(Debt::new(&remaining_credit, &creditor.user_uuid));
             }
         }
 
@@ -339,13 +339,13 @@ impl Group {
 impl Group {
     /// Checks whether an [Expense] is compatible with a group.
     ///
-    /// This function validates that the given expense can be added to a group composed of `users_id`
+    /// This function validates that the given expense can be added to a group composed of `users_uuid`
     /// and using `currency`. It ensures that the creditor and every beneficiary of the expense are
     /// part of the group, and that the expense uses the same currency as the group.
     ///
     /// # Arguments
     ///
-    /// * `users_id` - A reference to a list of string representing the unique identifier of the users that are part of the group.
+    /// * `users_uuid` - A reference to a list of string representing the unique identifier of the users that are part of the group.
     /// * `currency` - A reference to the [Currency] used by the group.
     /// * `expense` - A reference to the [Expense] to validate.
     ///
@@ -384,18 +384,18 @@ impl Group {
     /// Group::check_expense(&users_uuid, &currency, &expense).unwrap();
     /// ```
     pub fn check_expense(
-        users_id: &Vec<String>,
+        users_uuid: &Vec<String>,
         currency: &Currency,
         expense: &Expense,
     ) -> Result<(), GroupError> {
-        if !users_id.contains(&expense.creditor_id) {
+        if !users_uuid.contains(&expense.creditor_uuid) {
             return Err(GroupError::CreditorUnknown);
         }
 
         if !expense
             .beneficiaries
             .iter()
-            .all(|beneficiary| users_id.contains(&beneficiary.user_uuid))
+            .all(|beneficiary| users_uuid.contains(&beneficiary.user_uuid))
         {
             return Err(GroupError::BeneficiaryUnknown);
         }
