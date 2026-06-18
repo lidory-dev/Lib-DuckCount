@@ -257,7 +257,7 @@ impl Expense {
 ///
 /// * `amount` - The total amount of the expense.
 /// * `currency` - The currency in which the expense is made.
-/// * `beneficiary_uuids` - The UUIDs of all beneficiaries sharing the expense.
+/// * `beneficiary_user_uuids` - The UUIDs of all beneficiaries sharing the expense.
 /// * `fixed_shares` - A map from beneficiary UUID to an explicitly assigned share.
 ///
 /// # Errors
@@ -271,12 +271,12 @@ impl Expense {
 pub fn compute_beneficiaries(
     amount: &str,
     currency: &Currency,
-    beneficiary_uuids: &Vec<String>,
+    beneficiary_user_uuids: &Vec<String>,
     fixed_shares: &HashMap<String, String>,
 ) -> Result<Vec<Beneficiary>, ExpenseError> {
     if fixed_shares
         .iter()
-        .any(|(uuid, _)| !beneficiary_uuids.contains(uuid))
+        .any(|(uuid, _)| !beneficiary_user_uuids.contains(uuid))
     {
         return Err(ExpenseError::FixedShareForUnknownBeneficiary);
     }
@@ -290,7 +290,8 @@ pub fn compute_beneficiaries(
 
     let remaining_amount = (amount - total_share_amount).to_plain_string();
 
-    let number_of_beneficiaries_without_share: usize = beneficiary_uuids.len() - fixed_shares.len();
+    let number_of_beneficiaries_without_share: usize =
+        beneficiary_user_uuids.len() - fixed_shares.len();
 
     if number_of_beneficiaries_without_share == 0 {
         return Ok(fixed_shares
@@ -311,21 +312,21 @@ pub fn compute_beneficiaries(
         scale,
     )?;
 
-    let mut beneficiaries = Vec::with_capacity(beneficiary_uuids.len());
+    let mut beneficiaries = Vec::with_capacity(beneficiary_user_uuids.len());
 
     let mut divided_amount_iter = divided_amount.into_iter();
-    for beneficiary_uuid in beneficiary_uuids {
-        if !fixed_shares.contains_key(beneficiary_uuid) {
+    for beneficiary_user_uuid in beneficiary_user_uuids {
+        if !fixed_shares.contains_key(beneficiary_user_uuid) {
             if let Some(share) = divided_amount_iter.next() {
-                let beneficiary = Beneficiary::new(beneficiary_uuid, &share.to_plain_string());
+                let beneficiary = Beneficiary::new(beneficiary_user_uuid, &share.to_plain_string());
                 beneficiaries.push(beneficiary);
             }
         } else {
             let share = fixed_shares
-                .get(beneficiary_uuid)
+                .get(beneficiary_user_uuid)
                 .ok_or_else(|| ExpenseError::MalformedAmount)?;
 
-            let beneficiary = Beneficiary::new(beneficiary_uuid, share);
+            let beneficiary = Beneficiary::new(beneficiary_user_uuid, share);
 
             beneficiaries.push(beneficiary);
         }
