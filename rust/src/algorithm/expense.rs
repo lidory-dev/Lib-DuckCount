@@ -29,6 +29,9 @@ pub enum ExpenseError {
     /// There must be at least one beneficiary for an expense.
     #[error("There must be at least one beneficiary for an expense.")]
     NoBeneficiaries,
+    /// A fixed share was assigned to a UUID that is not among the beneficiaries.
+    #[error("A fixed share was assigned to a UUID that is not among the beneficiaries.")]
+    FixedShareForUnknownBeneficiary,
     /// The amount is malformed.
     #[error("The amount is malformed.")]
     MalformedAmount,
@@ -260,6 +263,7 @@ impl Expense {
 /// # Errors
 ///
 /// This function will return an error if:
+/// - A fixed share was assigned to a UUID that is not among the beneficiaries.
 /// - The amount or any explicitly set share is malformed and cannot be parsed.
 /// - A division by zero occurs while splitting the remaining amount.
 /// - An internal type conversion fails while splitting the remaining amount.
@@ -270,6 +274,13 @@ pub fn compute_beneficiaries(
     beneficiary_uuids: &Vec<String>,
     fixed_shares: &HashMap<String, String>,
 ) -> Result<Vec<Beneficiary>, ExpenseError> {
+    if fixed_shares
+        .iter()
+        .any(|(uuid, _)| !beneficiary_uuids.contains(uuid))
+    {
+        return Err(ExpenseError::FixedShareForUnknownBeneficiary);
+    }
+
     let amount = BigDecimal::from_str(amount).map_err(|_| ExpenseError::MalformedAmount)?;
 
     let total_share_amount = fixed_shares
