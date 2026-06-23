@@ -265,8 +265,37 @@ impl Expense {
 /// This function will return an error if:
 /// - A fixed share was assigned to a UUID that is not among the beneficiaries.
 /// - The amount or any explicitly set share is malformed and cannot be parsed.
+/// - Any fixed share is not positive.
+/// - The sum of the shares exceeds the total expense amount.
+/// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
 /// - A division by zero occurs while splitting the remaining amount.
 /// - An internal type conversion fails while splitting the remaining amount.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```rust
+/// # use lib_duckcount::algorithm::{beneficiary::Beneficiary, currency::Currency, expense::compute_beneficiaries};
+/// # use uuid::Uuid;
+/// # use std::collections::HashMap;
+///
+/// let alice_uuid = Uuid::new_v4().to_string();
+/// let bob_uuid = Uuid::new_v4().to_string();
+///
+/// let amount = "100.00";
+/// let currency = Currency::new("Euro", "€", true).unwrap();
+///
+/// let beneficiary_uuids = vec![alice_uuid.clone(), bob_uuid.clone()];
+///
+/// let mut fixed_shares = HashMap::new();
+/// fixed_shares.insert(alice_uuid.clone(), String::from("50.00"));
+///
+/// // Alice keeps her 50.00 share; Bob receives the remaining 50.00.
+/// let beneficiaries =
+///     compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares)
+///         .unwrap();
+/// ```
 #[uniffi::export]
 pub fn compute_beneficiaries(
     amount: &str,
@@ -274,26 +303,40 @@ pub fn compute_beneficiaries(
     beneficiary_user_uuids: &Vec<String>,
     fixed_shares: &HashMap<String, String>,
 ) -> Result<Vec<Beneficiary>, ExpenseError> {
-    if fixed_shares
-        .iter()
-        .any(|(uuid, _)| !beneficiary_user_uuids.contains(uuid))
-    {
-        return Err(ExpenseError::FixedShareForUnknownBeneficiary);
-    }
-
     let amount = BigDecimal::from_str(amount).map_err(|_| ExpenseError::MalformedAmount)?;
 
-    let total_share_amount = fixed_shares
-        .iter()
-        .map(|(_, share)| BigDecimal::from_str(share).map_err(|_| ExpenseError::MalformedAmount))
-        .sum::<Result<BigDecimal, _>>()?;
+    let mut total_share_amount = BigDecimal::from(0);
+    for (uuid, share) in fixed_shares {
+        if !beneficiary_user_uuids.contains(uuid) {
+            return Err(ExpenseError::FixedShareForUnknownBeneficiary);
+        }
 
-    let remaining_amount = (amount - total_share_amount).to_plain_string();
+        let share_amount =
+            BigDecimal::from_str(share).map_err(|_| ExpenseError::MalformedAmount)?;
+
+        if share_amount <= BigDecimal::from(0) {
+            return Err(ExpenseError::NonPositiveShare);
+        }
+
+        total_share_amount += share_amount;
+    }
+
+    if total_share_amount > amount {
+        return Err(ExpenseError::SharesExceedTotalAmount);
+    }
 
     let number_of_beneficiaries_without_share: usize =
         beneficiary_user_uuids.len() - fixed_shares.len();
 
     if number_of_beneficiaries_without_share == 0 {
+        if total_share_amount > amount {
+            return Err(ExpenseError::SharesExceedTotalAmount);
+        }
+
+        if total_share_amount < amount {
+            return Err(ExpenseError::SharesBelowTotalAmount);
+        }
+
         return Ok(fixed_shares
             .iter()
             .map(|(user_uuid, share)| Beneficiary::new(user_uuid, share))
@@ -305,6 +348,8 @@ pub fn compute_beneficiaries(
         true => 100,
         false => 1,
     };
+
+    let remaining_amount = (amount - total_share_amount).to_plain_string();
 
     let divided_amount = Expense::divide_amount(
         &remaining_amount,
