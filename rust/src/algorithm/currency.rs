@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 pub const CURRENCY_NAME_LENGHT: usize = 20;
+pub const CURRENCY_SYMBOL_LENGTH: usize = 4;
 
 #[derive(PartialEq, Eq, Debug, Clone, uniffi::Object)]
 pub struct Currency {
@@ -15,8 +16,8 @@ pub enum CurrencyError {
     /// The name is too short or too long. It should be between 1 and 20 characters.
     #[error("The name should be between 1 and 20 characters.")]
     NameLengthInvalid,
-    /// The symbol is too short or too long. It should be exactly one character.
-    #[error("The symbol should be a single character.")]
+    /// The symbol is too short or too long. It should be between 1 and 4 characters.
+    #[error("The symbol should be between 1 and 4 characters.")]
     SymbolLengthInvalid,
 }
 
@@ -45,7 +46,7 @@ impl Currency {
             return Err(CurrencyError::NameLengthInvalid);
         }
 
-        if symbol.chars().count() != 1 {
+        if !(1..CURRENCY_SYMBOL_LENGTH + 1).contains(&symbol.chars().count()) {
             return Err(CurrencyError::SymbolLengthInvalid);
         }
 

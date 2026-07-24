@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn test_currency_symbol_too_long() {
-        let currency = Currency::new("Euro", "€€", true).unwrap_err();
+        let currency = Currency::new("Euro", "€€€€€", true).unwrap_err();
 
         assert_eq!(currency, CurrencyError::SymbolLengthInvalid);
     }
