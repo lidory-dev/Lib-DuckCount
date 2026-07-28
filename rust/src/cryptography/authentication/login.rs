@@ -18,6 +18,16 @@ struct Login {
     state: Mutex<Vec<u8>>,
 }
 
+#[derive(uniffi::Record)]
+pub struct LoginFinishResult {
+    /// Serialized `CredentialFinalization` message to send to the server.
+    pub message: Vec<u8>,
+    /// Export key derived from the password. Identical to the export key
+    /// produced at registration for the same password, so it can be used to
+    /// derive client-side encryption keys.
+    pub export_key: Vec<u8>,
+}
+
 #[uniffi::export]
 impl Login {
     /// Creates a new [`Login`] with an empty internal state.
@@ -62,7 +72,8 @@ impl Login {
         Ok(client_login.message.serialize().to_vec())
     }
 
-    /// Generates the final message bytes for completing the credential login process.
+    /// Completes the login process, producing the final message to send to the
+    /// server and the export key derived from the password.
     ///
     /// # Arguments
     ///
@@ -71,13 +82,25 @@ impl Login {
     ///
     /// # Returns
     ///
-    /// A `Result` containing a vector of bytes representing the serialized final message if successful,
-    /// or an [AuthenticationError] otherwise.
+    /// A `Result` containing a [`LoginFinishResult`] if successful, or an
+    /// [`AuthenticationError`] otherwise. On success the result holds the
+    /// serialized `CredentialFinalization` message to send to the server and
+    /// the export key derived from the password. The export key matches the one
+    /// returned by registration for the same password and never leaves the
+    /// client, so it is suitable for deriving client-side encryption keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthenticationError::FinishCalledBeforeStart`] if
+    /// [`start`](Self::start) has not been called, or a deserialization error if
+    /// the stored state or the credential response is invalid. A failure of the
+    /// finish step itself (which includes an incorrect password) yields
+    /// [`AuthenticationError::ClientLoginFinalizationFailed`].
     fn finish(
         &self,
         credential_response_bytes: &Vec<u8>,
         password: &str,
-    ) -> Result<Vec<u8>, AuthenticationError> {
+    ) -> Result<LoginFinishResult, AuthenticationError> {
         let state = self
             .state
             .lock()
@@ -93,13 +116,17 @@ impl Login {
         let client_login_finish = client_login
             .finish(
                 password.as_bytes(),
-                CredentialResponse::deserialize(credential_response_bytes).unwrap(),
+                CredentialResponse::deserialize(credential_response_bytes)
+                    .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
                 ClientLoginFinishParameters::default(),
             )
             .map_err(|error| {
                 AuthenticationError::ClientLoginFinalizationFailed(error.to_string())
             })?;
 
-        Ok(client_login_finish.message.serialize().to_vec())
+        Ok(LoginFinishResult {
+            message: client_login_finish.message.serialize().to_vec(),
+            export_key: client_login_finish.export_key.to_vec(),
+        })
     }
 }

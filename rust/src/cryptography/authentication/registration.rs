@@ -18,6 +18,15 @@ struct Registration {
     state: Mutex<Vec<u8>>,
 }
 
+#[derive(uniffi::Record)]
+pub struct RegistrationFinishResult {
+    /// Serialized RegistrationUpload message to send to the server.
+    pub message: Vec<u8>,
+    /// Export key derived from the password. Stable across registration
+    /// and login, so it can be used to derive client-side encryption keys.
+    pub export_key: Vec<u8>,
+}
+
 #[uniffi::export]
 impl Registration {
     /// Creates a new [`Registration`] with an empty internal state.
@@ -62,7 +71,8 @@ impl Registration {
         Ok(client_registration.message.serialize().to_vec())
     }
 
-    /// Generates message bytes for completing the registration process.
+    /// Completes the registration process, producing the message to send to
+    /// the server and the export key derived from the password.
     ///
     /// # Arguments
     ///
@@ -71,12 +81,23 @@ impl Registration {
     ///
     /// # Returns
     ///
-    /// A `Result` containing a vector of bytes representing the serialized message if successful, or an [AuthenticationError] otherwise.
+    /// A `Result` containing a [`RegistrationFinishResult`] if successful, or an
+    /// [`AuthenticationError`] otherwise. On success the result holds the
+    /// serialized `RegistrationUpload` message to send to the server and the
+    /// export key derived from the password. The export key is reproducible at
+    /// login time and never leaves the client, so it is suitable for deriving
+    /// client-side encryption keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthenticationError::FinishCalledBeforeStart`] if [`start`](Self::start)
+    /// has not been called, or a deserialization/finalization error if the
+    /// stored state, the registration response, or the finish step is invalid.
     fn finish(
         &self,
         registration_response_bytes: &Vec<u8>,
         password: &str,
-    ) -> Result<Vec<u8>, AuthenticationError> {
+    ) -> Result<RegistrationFinishResult, AuthenticationError> {
         let state = self
             .state
             .lock()
@@ -98,7 +119,10 @@ impl Registration {
                 .map_err(|_| AuthenticationError::RegistrationResponseDeserializationFailed)?,
             ClientRegistrationFinishParameters::default(),
         ) {
-            Ok(result) => Ok(result.message.serialize().to_vec()),
+            Ok(result) => Ok(RegistrationFinishResult {
+                message: result.message.serialize().to_vec(),
+                export_key: result.export_key.to_vec(),
+            }),
             Err(_) => Err(AuthenticationError::ClientRegistrationFinalizationFailed),
         }
     }

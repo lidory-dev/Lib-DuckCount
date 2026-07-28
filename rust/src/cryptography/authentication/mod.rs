@@ -33,6 +33,7 @@ pub enum AuthenticationError {
     ClientLoginFinalizationFailed(String),
     MutexAcquisitionFailed,
     FinishCalledBeforeStart,
+    CredentialResponseDeserializationFailed,
 }
 
 impl Display for AuthenticationError {
@@ -65,6 +66,9 @@ impl Display for AuthenticationError {
                     f,
                     "finish() was called before start(). No session state is available."
                 )
+            }
+            AuthenticationError::CredentialResponseDeserializationFailed => {
+                write!(f, "Could not deserialize credential response.")
             }
         }
     }
