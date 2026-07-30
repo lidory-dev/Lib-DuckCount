@@ -1,0 +1,209 @@
+//! [`GroupStateStorage`] backed by the host's [`MlsStore`].
+
+use std::sync::Arc;
+
+use mls_rs_core::group::{EpochRecord, GroupState, GroupStateStorage};
+use zeroize::Zeroizing;
+
+use crate::cryptography::mls::{
+    MlsError,
+    storage::{MlsNamespace, MlsStore, sealed_record::SealingKey},
+};
+
+/// How many prior epochs of a group are kept.
+///
+/// A member who commits while a peer's application message is still in flight
+/// would otherwise be unable to decrypt that message, because it was sealed
+/// under the epoch that just ended. Three is the same depth mls-rs's own
+/// in-memory provider retains.
+const MAX_EPOCH_RETENTION: usize = 3;
+
+/// Group state storage that seals every record before the host sees it.
+///
+/// All clones share the same underlying host store.
+#[derive(Clone)]
+pub struct SealedGroupStateStorage {
+    store: Arc<dyn MlsStore>,
+    sealing_key: SealingKey,
+}
+
+impl SealedGroupStateStorage {
+    /// Creates a storage adapter over `store`.
+    pub fn new(store: Arc<dyn MlsStore>, sealing_key: SealingKey) -> Self {
+        Self { store, sealing_key }
+    }
+
+    /// Deletes a group's current state and every retained prior epoch.
+    ///
+    /// Group state is deliberately *not* removed by the protocol when the local
+    /// member is removed from a group, so callers that want the secrets gone
+    /// have to ask.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    pub fn delete_group(&self, group_id: &[u8]) -> Result<(), MlsError> {
+        for key in self.epoch_keys(group_id)? {
+            self.store
+                .delete(MlsNamespace::GroupEpoch, key)
+                .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+        }
+
+        self.store
+            .delete(MlsNamespace::GroupState, group_id.to_vec())
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))
+    }
+
+    /// Builds the store key of one epoch record.
+    ///
+    /// The group id is length-prefixed so that `epoch_keys` can match on a
+    /// prefix without one group id ever being mistaken for the start of a
+    /// longer one.
+    fn epoch_key(group_id: &[u8], epoch_id: u64) -> Vec<u8> {
+        let mut key = Self::epoch_key_prefix(group_id);
+
+        key.extend_from_slice(&epoch_id.to_be_bytes());
+
+        key
+    }
+
+    /// Builds the shared prefix of every epoch record of one group.
+    fn epoch_key_prefix(group_id: &[u8]) -> Vec<u8> {
+        let group_id_length = group_id.len() as u16;
+
+        let mut prefix = Vec::with_capacity(2 + group_id.len());
+
+        prefix.extend_from_slice(&group_id_length.to_be_bytes());
+        prefix.extend_from_slice(group_id);
+
+        prefix
+    }
+
+    /// Lists the store keys of every retained epoch of one group.
+    fn epoch_keys(&self, group_id: &[u8]) -> Result<Vec<Vec<u8>>, MlsError> {
+        let prefix = Self::epoch_key_prefix(group_id);
+        let key_length = prefix.len() + size_of::<u64>();
+
+        Ok(self
+            .store
+            .keys(MlsNamespace::GroupEpoch)
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?
+            .into_iter()
+            .filter(|key| key.len() == key_length && key.starts_with(&prefix))
+            .collect())
+    }
+
+    /// Lists the retained epoch numbers of one group, in ascending order.
+    fn epoch_ids(&self, group_id: &[u8]) -> Result<Vec<u64>, MlsError> {
+        let prefix_length = Self::epoch_key_prefix(group_id).len();
+
+        let mut epoch_ids = self
+            .epoch_keys(group_id)?
+            .into_iter()
+            .filter_map(|key| key[prefix_length..].try_into().ok().map(u64::from_be_bytes))
+            .collect::<Vec<_>>();
+
+        epoch_ids.sort_unstable();
+
+        Ok(epoch_ids)
+    }
+
+    /// Writes one epoch record.
+    fn write_epoch(&self, group_id: &[u8], epoch: &EpochRecord) -> Result<(), MlsError> {
+        let key = Self::epoch_key(group_id, epoch.id);
+        let sealed = self
+            .sealing_key
+            .seal(MlsNamespace::GroupEpoch, &key, &epoch.data)?;
+
+        self.store
+            .put(MlsNamespace::GroupEpoch, key, sealed)
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))
+    }
+
+    /// Drops the oldest epochs of a group beyond [`MAX_EPOCH_RETENTION`].
+    fn trim_epochs(&self, group_id: &[u8]) -> Result<(), MlsError> {
+        let epoch_ids = self.epoch_ids(group_id)?;
+
+        let Some(excess) = epoch_ids.len().checked_sub(MAX_EPOCH_RETENTION) else {
+            return Ok(());
+        };
+
+        for epoch_id in &epoch_ids[..excess] {
+            self.store
+                .delete(
+                    MlsNamespace::GroupEpoch,
+                    Self::epoch_key(group_id, *epoch_id),
+                )
+                .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+        }
+
+        Ok(())
+    }
+}
+
+impl GroupStateStorage for SealedGroupStateStorage {
+    type Error = MlsError;
+
+    fn state(&self, group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        let Some(sealed) = self
+            .store
+            .get(MlsNamespace::GroupState, group_id.to_vec())
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        self.sealing_key
+            .unseal(MlsNamespace::GroupState, group_id, &sealed)
+            .map(Some)
+    }
+
+    fn epoch(
+        &self,
+        group_id: &[u8],
+        epoch_id: u64,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, Self::Error> {
+        let key = Self::epoch_key(group_id, epoch_id);
+
+        let Some(sealed) = self
+            .store
+            .get(MlsNamespace::GroupEpoch, key.clone())
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+
+        self.sealing_key
+            .unseal(MlsNamespace::GroupEpoch, &key, &sealed)
+            .map(Some)
+    }
+
+    fn write(
+        &mut self,
+        state: GroupState,
+        epoch_inserts: Vec<EpochRecord>,
+        epoch_updates: Vec<EpochRecord>,
+    ) -> Result<(), Self::Error> {
+        // Epochs are written first and the group state last: the state record is
+        // the commit point. A crash between the two leaves epoch records nothing
+        // refers to, which the next write overwrites, rather than a group state
+        // referring to epochs that were never stored.
+        for epoch in epoch_inserts.iter().chain(epoch_updates.iter()) {
+            self.write_epoch(&state.id, epoch)?;
+        }
+
+        let sealed = self
+            .sealing_key
+            .seal(MlsNamespace::GroupState, &state.id, &state.data)?;
+
+        self.store
+            .put(MlsNamespace::GroupState, state.id.clone(), sealed)
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
+        self.trim_epochs(&state.id)
+    }
+
+    fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
+        Ok(self.epoch_ids(group_id)?.last().copied())
+    }
+}

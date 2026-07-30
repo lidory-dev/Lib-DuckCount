@@ -43,9 +43,9 @@ use crate::cryptography::encryption::{EncryptionError, FIXED_NONCE};
 /// let key = generate_symmetric_deterministic_encryption_key();
 ///
 /// let plaintext = b"hello world".to_vec();
-/// let cipher_text = encrypt_deterministically_using_symmetric_key(&key, &plaintext).unwrap();
+/// let ciphertext = encrypt_deterministically_using_symmetric_key(&key, &plaintext).unwrap();
 ///
-/// println!("Encrypted text: {:?}", cipher_text);
+/// println!("Encrypted text: {:?}", ciphertext);
 /// ```
 #[uniffi::export]
 pub fn encrypt_deterministically_using_symmetric_key(
@@ -62,11 +62,11 @@ pub fn encrypt_deterministically_using_symmetric_key(
 
     let fixed_nonce = NonceSiv::from_slice(&FIXED_NONCE);
 
-    let cipher_text = cipher
+    let ciphertext = cipher
         .encrypt(fixed_nonce, plaintext_message.as_ref())
         .map_err(|_| EncryptionError::EncryptionFailed)?;
 
-    Ok(cipher_text)
+    Ok(ciphertext)
 }
 
 /// Encrypts plaintext using a symmetric key and a randomly generated nonce.

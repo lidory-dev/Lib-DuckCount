@@ -13,6 +13,9 @@ A Rust library for **shared expense management** and **secure cryptographic util
 ### **Cryptography & Security**
 - **🔒 Secure Authentication**: Tools for user authentication using the OPAQUE protocol.
 - **🪪 Usernames**: Turn a handle into the digest the server knows it by, hashed with **SHA3-512** under a domain separator. A *discovery* username is normalized and validated first (trimmed, lowercased, ASCII letters and digits only, starting with a letter) and hashed under `duckcount:discovery-username:v1:`; a *login* username is an opaque credential identifier, normalized and validated first (trimmed, lowercased, ASCII letters and digits only, starting with a letter), and hashed under `duckcount:login-username:v1:`. The distinct domains keep the same handle from ever producing the same digest for both purposes. Algorithm and domain strings are wire protocol: every client must reproduce them exactly.
+- **👥 End-to-End Encrypted Groups**: Group messaging built on **MLS** (RFC 9420, via `mls-rs`), used to distribute per-expense keys. The server relays Welcomes, Commits, and application messages as opaque ciphertext and holds no group secrets.
+- **🛡️ Post-Quantum Confidentiality**: MLS groups run on the **ML-KEM-768 + X25519** hybrid cipher suite, so traffic captured today stays private even against a future quantum adversary. It is the only suite enabled, which makes a downgrade impossible.
+- **📌 Identity Pinning**: Each member's signature key is pinned to their user UUID on first contact and any later change is refused, so the server cannot substitute its own key for a peer's. Safety numbers are exposed for out-of-band verification.
 - **🔑 Symmetric Key Encryption**: Encrypt and decrypt data using symmetric keys.
 - **🗄️ Encrypted Vault & Secure Server Storage**: Tools for securely storing and managing encrypted data using zero-access encryption.
 - **🔄 Deterministic & Non-Deterministic Encryption**: Support for both deterministic and non-deterministic encryption methods.
@@ -23,6 +26,8 @@ A Rust library for **shared expense management** and **secure cryptographic util
 
 - **UUIDs**: We recommend using only UUID version 4 or 7 for expense calculations, as they are used as tie-breakers and provide the necessary uniqueness and randomness.
 - **Security**: This crate uses industry-standard cryptographic algorithms and best practices for secure data handling. All sensitive data is securely stored on the server using zero-access encryption.
+- **MLS state**: MLS group state and key package secrets are persisted by the host through the `MlsStore` callback interface. Every record is sealed with AES-256-GCM under a key derived from the user's vault secret before it leaves this crate, and is bound to the slot it is stored in, so the host never holds usable group secrets.
+- **Build prerequisites**: The post-quantum cipher suite comes from `aws-lc-sys`, which needs **CMake** on `PATH` to cross-compile for Android and iOS. The `bindgen` feature is enabled for those targets because AWS-LC ships no pre-generated bindings for them.
 - **Audits**: No third-party audit has been conducted yet, but the crate relies on trusted and audited libraries for cryptography.
 - **Vulnerability Reporting**: To report vulnerabilities, please contact us at **[security@duckcount.com](mailto:security@duckcount.com)**.
 

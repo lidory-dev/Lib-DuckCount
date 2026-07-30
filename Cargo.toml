@@ -26,8 +26,25 @@ sha3 = "0.10.8" # MIT OR Apache-2.0
 serde = { version = "1.0.228", features = ["rc"] } # MIT OR Apache-2.0
 serde_json = "1.0.149" # MIT OR Apache-2.0
 base64 = "0.22.1" # MIT OR Apache-2.0
-openmls = "0.8.0" # MIT
 zeroize = "1.9.0" # Apache-2.0 OR MIT
+mls-rs = { version = "0.55.2", features = [
+    # Marks a key package as reusable, matching the server's `is_last_resort` column.
+    "last_resort_key_package_ext",
+    # Lets a departing user propose their own removal on account deletion.
+    "self_remove_proposal",
+] } # Apache-2.0 OR MIT
+mls-rs-core = "0.27.0" # Apache-2.0 OR MIT
+mls-rs-codec = "0.7.0" # Apache-2.0 OR MIT
+mls-rs-crypto-awslc = { version = "0.25.0", features = ["post-quantum"] } # Apache-2.0 OR MIT
+# declared here only to turn its `bindgen` feature on. aws-lc-sys ships
+# Not used directly: this is `mls-rs-crypto-awslc`'s own transitive dependency,
+# pre-generated bindings for a handful of platforms; none of the Android or iOS
+# targets are among them, so without this the cross-compilation of every mobile
+# target fails. The feature builds bindings in-process (needs libclang, which
+# Xcode provides) instead of requiring each developer to install bindgen-cli.
+# The version is pinned exactly, as mls-rs-crypto-awslc pins it, keep the two
+# in step when upgrading.
+aws-lc-sys = { version = "=0.40.0", features = ["bindgen"] } # ISC AND ( Apache-2.0 OR ISC ) AND Apache-2.0 AND MIT AND BSD-3-Clause AND ( Apache-2.0 OR ISC OR MIT ) AND ( Apache-2.0 OR ISC OR MIT-0 )
 
 [dev-dependencies]
 # Algorithm

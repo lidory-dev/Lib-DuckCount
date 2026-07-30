@@ -1,0 +1,13 @@
+# Applies to every cargo invocation for this crate, whether it comes from
+# Gobley during a Gradle build or from `cargo` on the command line.
+
+[env]
+# Rust defaults `aarch64-apple-ios` to a deployment target of iOS 10.0, while
+# the `cc` crate builds aws-lc-sys' C and assembly against the installed SDK.
+# The mismatch fails the link with an undefined `___chkstk_darwin`, a symbol
+# libSystem only exports from iOS 12 onwards. Pinning the deployment target
+# makes both halves agree.
+#
+# The value tracks IPHONEOS_DEPLOYMENT_TARGET in iosApp/iosApp.xcodeproj, which
+# is the only thing this library is ever linked into. Keep the two in step.
+IPHONEOS_DEPLOYMENT_TARGET = "18.2"
