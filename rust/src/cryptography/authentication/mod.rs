@@ -4,6 +4,7 @@ use argon2::Argon2;
 use opaque_ke::CipherSuite;
 
 mod login;
+mod reauth;
 mod registration;
 
 struct DefaultCipherSuite;
