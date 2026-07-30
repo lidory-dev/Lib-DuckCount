@@ -12,6 +12,7 @@ A Rust library for **shared expense management** and **secure cryptographic util
 
 ### **Cryptography & Security**
 - **🔒 Secure Authentication**: Tools for user authentication using the OPAQUE protocol.
+- **🪪 Discovery Usernames**: Turn a handle into the digest the server stores as a reserved username. The handle is normalized (trimmed, lowercased, ASCII letters and digits only, starting with a letter) and hashed with **SHA3-512** under the `duckcount:reserved-username:v1:` domain separator, so a discovery digest can never collide with one computed for another purpose. Both the algorithm and the domain string are wire protocol: every client that resolves a handle must reproduce them exactly.
 - **🔑 Symmetric Key Encryption**: Encrypt and decrypt data using symmetric keys.
 - **🗄️ Encrypted Vault & Secure Server Storage**: Tools for securely storing and managing encrypted data using zero-access encryption.
 - **🔄 Deterministic & Non-Deterministic Encryption**: Support for both deterministic and non-deterministic encryption methods.
