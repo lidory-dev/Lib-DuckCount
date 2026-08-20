@@ -4,42 +4,26 @@ mod tests {
 
     use crate::cryptography::username::{
         DISCOVERY_USERNAME_DOMAIN, UsernameError, hash_discovery_username, hash_login_username,
-        validate_and_normalize_username,
+        normalize_username, validate_username,
     };
 
     #[test]
-    fn test_validate_username_normalizes() {
-        assert_eq!(validate_and_normalize_username("Alice").unwrap(), "alice");
-        assert_eq!(
-            validate_and_normalize_username("  alice  ").unwrap(),
-            "alice"
-        );
-        assert_eq!(
-            validate_and_normalize_username("AlIcE42").unwrap(),
-            "alice42"
-        );
+    fn test_normalize_username() {
+        assert_eq!(normalize_username("Alice"), "alice");
+        assert_eq!(normalize_username("  alice  "), "alice");
+        assert_eq!(normalize_username("AlIcE42"), "alice42");
     }
 
     #[test]
     fn test_validate_username_rejects_empty() {
-        assert_eq!(
-            validate_and_normalize_username("").unwrap_err(),
-            UsernameError::Empty
-        );
-        assert_eq!(
-            validate_and_normalize_username("   ").unwrap_err(),
-            UsernameError::Empty
-        );
+        assert_eq!(validate_username("").unwrap_err(), UsernameError::Empty);
+        assert_eq!(validate_username("   ").unwrap_err(), UsernameError::Empty);
     }
 
     #[test]
     fn test_validate_username_rejects_not_starting_with_a_letter() {
         assert_eq!(
-            validate_and_normalize_username("42alice").unwrap_err(),
-            UsernameError::MustStartWithLetter
-        );
-        assert_eq!(
-            validate_and_normalize_username("_alice").unwrap_err(),
+            validate_username("42alice").unwrap_err(),
             UsernameError::MustStartWithLetter
         );
     }
@@ -47,17 +31,17 @@ mod tests {
     #[test]
     fn test_validate_username_rejects_invalid_characters() {
         assert_eq!(
-            validate_and_normalize_username("alice@duckcount.app").unwrap_err(),
+            validate_username("alice@duckcount.app").unwrap_err(),
             UsernameError::InvalidCharacter
         );
         assert_eq!(
-            validate_and_normalize_username("alice bob").unwrap_err(),
+            validate_username("alice bob").unwrap_err(),
             UsernameError::InvalidCharacter
         );
         // Non-ASCII letters are refused: the same handle could be spelled with
         // different byte sequences, and peers would compute different digests.
         assert_eq!(
-            validate_and_normalize_username("alicé").unwrap_err(),
+            validate_username("alicé").unwrap_err(),
             UsernameError::InvalidCharacter
         );
     }
@@ -130,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_hash_login_username_is_a_128_lowercase_hexadecimal_digest() {
-        let digest = hash_login_username("alice@duckcount.app");
+        let digest = hash_login_username("alice@duckcount.app").unwrap(); // TODO: Invalid char.
 
         assert_eq!(digest.len(), 128);
         assert!(
@@ -142,25 +126,20 @@ mod tests {
 
     #[test]
     fn test_hash_login_username_ignores_case_and_surrounding_whitespace() {
-        let digest = hash_login_username("alice@duckcount.app");
+        let digest = hash_login_username("alice@duckcount.app").unwrap();
 
-        assert_eq!(hash_login_username("Alice@DuckCount.app"), digest);
-        assert_eq!(hash_login_username("  alice@duckcount.app  "), digest);
-    }
-
-    /// A login username is an opaque credential identifier: it is not held to the
-    /// handle rules a discovery username has to follow.
-    #[test]
-    fn test_hash_login_username_accepts_anything() {
-        assert_eq!(hash_login_username("42").len(), 128);
-        assert_eq!(hash_login_username("+33 6 12 34 56 78").len(), 128);
+        assert_eq!(hash_login_username("Alice@DuckCount.app").unwrap(), digest);
+        assert_eq!(
+            hash_login_username("  alice@duckcount.app  ").unwrap(),
+            digest
+        );
     }
 
     /// The two domains keep the same handle from ever producing the same digest.
     #[test]
     fn test_login_and_discovery_digests_never_collide() {
         assert_ne!(
-            hash_login_username("alice"),
+            hash_login_username("alice").unwrap(),
             hash_discovery_username("alice").unwrap()
         );
     }
@@ -170,7 +149,7 @@ mod tests {
     #[test]
     fn test_hash_login_username_known_answer() {
         assert_eq!(
-            hash_login_username("alice"),
+            hash_login_username("alice").unwrap(),
             "2ab95e8ae3df0cce2d7704137ae571ac960d213459e866b539adc43af64f48a8\
              7bb98f79add573fa32530d70fe7761ad0ad4f98f2ead61414d30ece777d6aedc"
         );

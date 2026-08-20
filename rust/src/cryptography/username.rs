@@ -29,6 +29,15 @@ pub enum UsernameError {
     InvalidCharacter,
 }
 
+#[uniffi::export]
+pub fn normalize_username(username: &str) -> String {
+    username
+        .to_lowercase()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect()
+}
+
 /// Validates a username and returns its normalized form.
 ///
 /// Normalizing means trimming the surrounding whitespace and lowercasing, so that
@@ -57,28 +66,29 @@ pub enum UsernameError {
 /// # Example
 ///
 /// ```rust
-/// # use lib_duckcount::cryptography::username::validate_and_normalize_username;
-/// assert_eq!(validate_and_normalize_username("  Alice42 ").unwrap(), "alice42");
-/// assert!(validate_and_normalize_username("42alice").is_err());
+/// # use lib_duckcount::cryptography::username::validate_username;
+/// assert!(validate_username("  Alice42 ").is_err());
+/// assert!(validate_username("42alice").is_err());
 /// ```
 #[uniffi::export]
-pub fn validate_and_normalize_username(username: &str) -> Result<String, UsernameError> {
-    let normalized = username.trim().to_ascii_lowercase();
+pub fn validate_username(username: &str) -> Result<(), UsernameError> {
+    let normalized_username = normalize_username(username);
 
-    let first_character = normalized.chars().next().ok_or(UsernameError::Empty)?;
+    if normalized_username.len() == 0 {
+        return Err(UsernameError::Empty);
+    }
+
+    if username != normalized_username {
+        return Err(UsernameError::InvalidCharacter);
+    }
+
+    let first_character = username.chars().next().ok_or(UsernameError::Empty)?;
 
     if !first_character.is_ascii_alphabetic() {
         return Err(UsernameError::MustStartWithLetter);
     }
 
-    if !normalized
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric())
-    {
-        return Err(UsernameError::InvalidCharacter);
-    }
-
-    Ok(normalized)
+    Ok(())
 }
 
 /// Hashes a username into the digest the server stores as a discovery username.
@@ -99,7 +109,7 @@ pub fn validate_and_normalize_username(username: &str) -> Result<String, Usernam
 ///
 /// # Errors
 ///
-/// Returns the same errors as [validate_and_normalize_username].
+/// Returns the same errors as [validate_username].
 ///
 /// # Example
 ///
@@ -113,17 +123,20 @@ pub fn validate_and_normalize_username(username: &str) -> Result<String, Usernam
 /// ```
 #[uniffi::export]
 pub fn hash_discovery_username(username: &str) -> Result<String, UsernameError> {
-    let normalized = validate_and_normalize_username(username)?;
+    let normalized_username = normalize_username(username);
 
-    Ok(hash_with_domain(DISCOVERY_USERNAME_DOMAIN, &normalized))
+    validate_username(&normalized_username)?;
+
+    Ok(hash_with_domain(
+        DISCOVERY_USERNAME_DOMAIN,
+        &normalized_username,
+    ))
 }
 
 /// Hashes the OPAQUE login username into the digest the server knows the account by.
 ///
 /// Unlike a discovery username, this one is an opaque credential identifier that is
-/// never shared, so whatever the user picked at registration is accepted as is.
-/// Only the surrounding whitespace and the ASCII case are normalized, so that
-/// logging in reproduces the digest registration produced.
+/// never shared.
 ///
 /// # Arguments
 ///
@@ -132,23 +145,29 @@ pub fn hash_discovery_username(username: &str) -> Result<String, UsernameError> 
 /// # Returns
 ///
 /// The digest, encoded as 128 lowercase hexadecimal characters.
+/// If an error occurs, returns the same errors as [validate_username].
 ///
 /// # Example
 ///
 /// ```rust
 /// # use lib_duckcount::cryptography::username::{hash_login_username, hash_discovery_username};
-/// let digest = hash_login_username("Alice");
+/// let digest = hash_login_username("Alice").unwrap();
 ///
 /// assert_eq!(digest.len(), 128);
-/// assert_eq!(digest, hash_login_username("alice"));
+/// assert_eq!(digest, hash_login_username("alice").unwrap());
 /// // The same handle never yields the same digest for both purposes.
 /// assert_ne!(digest, hash_discovery_username("alice").unwrap());
 /// ```
 #[uniffi::export]
-pub fn hash_login_username(username: &str) -> String {
-    let normalized = username.trim().to_ascii_lowercase();
+pub fn hash_login_username(username: &str) -> Result<String, UsernameError> {
+    let normalized_username = normalize_username(username);
 
-    hash_with_domain(LOGIN_USERNAME_DOMAIN, &normalized)
+    validate_username(&normalized_username)?;
+
+    Ok(hash_with_domain(
+        LOGIN_USERNAME_DOMAIN,
+        &normalized_username,
+    ))
 }
 
 /// Hashes `value` under `domain` with SHA3-512, hexadecimal encoded.
