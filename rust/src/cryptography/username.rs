@@ -1,6 +1,18 @@
 use sha3::{Digest, Sha3_512};
 use thiserror::Error;
 
+/// Maximum number of characters allowed in a username.
+const USERNAME_MAXIMUM_LENGTH: usize = 32;
+
+/// Exposes [`USERNAME_MAXIMUM_LENGTH`] to the foreign bindings
+/// so clients can use it instead of hardcoding the limit.
+///
+/// UniFFI has no `usize` support, so the value is narrowed to `u16`.
+#[uniffi::export]
+fn username_maximum_length() -> u16 {
+    USERNAME_MAXIMUM_LENGTH as u16
+}
+
 /// Domain separator prepended to a handle before it is hashed into a discovery
 /// username digest.
 ///
@@ -21,6 +33,9 @@ pub enum UsernameError {
     /// A username is required.
     #[error("A username is required.")]
     Empty,
+    /// A username cannot be longer than [USERNAME_MAXIMUM_LENGTH].
+    #[error("A username cannot be longer than {USERNAME_MAXIMUM_LENGTH}.")]
+    TooLong,
     /// A username must start with a letter.
     #[error("A username must start with a letter.")]
     MustStartWithLetter,
@@ -76,6 +91,10 @@ pub fn validate_username(username: &str) -> Result<(), UsernameError> {
 
     if normalized_username.len() == 0 {
         return Err(UsernameError::Empty);
+    }
+
+    if normalized_username.len() > USERNAME_MAXIMUM_LENGTH {
+        return Err(UsernameError::TooLong);
     }
 
     if username != normalized_username {

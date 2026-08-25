@@ -21,6 +21,14 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_username_rejects_too_long() {
+        assert_eq!(
+            validate_username("duckcountduckcountduckcountduckcount").unwrap_err(),
+            UsernameError::TooLong
+        );
+    }
+
+    #[test]
     fn test_validate_username_rejects_not_starting_with_a_letter() {
         assert_eq!(
             validate_username("42alice").unwrap_err(),
