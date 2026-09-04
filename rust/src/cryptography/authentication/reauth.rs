@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use rand::rngs::OsRng;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuite};
 
@@ -15,7 +16,7 @@ use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuit
 struct ReAuth {
     /// Serialized `ClientLogin` state produced by `start` and consumed by
     /// `finish`. Empty until `start` has been called successfully.
-    state: Mutex<Vec<u8>>,
+    state: Mutex<Zeroizing<Vec<u8>>>,
 }
 
 #[uniffi::export]
@@ -31,7 +32,7 @@ impl ReAuth {
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(Vec::new()),
+            state: Mutex::new(Zeroizing::new(Vec::new())),
         }
     }
 
@@ -56,8 +57,9 @@ impl ReAuth {
         let client_login = ClientLogin::<DefaultCipherSuite>::start(&mut rng, password.as_bytes())
             .map_err(|_| AuthenticationError::StartingLoginFailed)?;
 
-        state.clear();
-        state.append(&mut client_login.state.serialize().to_vec());
+        let mut serialized = client_login.state.serialize();
+        *state = Zeroizing::new(serialized.to_vec());
+        serialized.zeroize();
 
         Ok(client_login.message.serialize().to_vec())
     }
@@ -78,7 +80,7 @@ impl ReAuth {
         credential_response_bytes: &Vec<u8>,
         password: &str,
     ) -> Result<Vec<u8>, AuthenticationError> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
@@ -89,6 +91,8 @@ impl ReAuth {
 
         let client_login = ClientLogin::<DefaultCipherSuite>::deserialize(&state)
             .map_err(|_| AuthenticationError::ClientLoginStateDeserializationFailed)?;
+
+        state.zeroize();
 
         let client_login_finish = client_login
             .finish(

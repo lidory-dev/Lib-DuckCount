@@ -2,8 +2,13 @@ use std::sync::Mutex;
 
 use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
 use rand::rngs::OsRng;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuite};
+use crate::cryptography::{
+    authentication::{AuthenticationError, DefaultCipherSuite},
+    encryption::decrypt::decrypt_using_symmetric_key,
+    vault::encrypted_field::EncryptedField,
+};
 
 /// Represents a client-side OPAQUE login session.
 ///
@@ -15,17 +20,17 @@ use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuit
 struct Login {
     /// Serialized `ClientLogin` state produced by `start` and consumed by
     /// `finish`. Empty until `start` has been called successfully.
-    state: Mutex<Vec<u8>>,
+    state: Mutex<Zeroizing<Vec<u8>>>,
+    /// Export key derived from the password by `finish` and consumed by
+    /// `unseal_root_key`. Empty until `finish` has been called successfully,
+    /// and zeroized again once the root key has been unsealed.
+    export_key: Mutex<Zeroizing<Vec<u8>>>,
 }
 
 #[derive(uniffi::Record)]
 pub struct LoginFinishResult {
     /// Serialized `CredentialFinalization` message to send to the server.
     pub message: Vec<u8>,
-    /// Export key derived from the password. Identical to the export key
-    /// produced at registration for the same password, so it can be used to
-    /// derive client-side encryption keys.
-    pub export_key: Vec<u8>,
 }
 
 #[uniffi::export]
@@ -41,7 +46,8 @@ impl Login {
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(Vec::new()),
+            state: Mutex::new(Zeroizing::new(Vec::new())),
+            export_key: Mutex::new(Zeroizing::new(Vec::new())),
         }
     }
 
@@ -66,8 +72,9 @@ impl Login {
         let client_login = ClientLogin::<DefaultCipherSuite>::start(&mut rng, password.as_bytes())
             .map_err(|_| AuthenticationError::StartingLoginFailed)?;
 
-        state.clear();
-        state.append(&mut client_login.state.serialize().to_vec());
+        let mut serialized = client_login.state.serialize();
+        *state = Zeroizing::new(serialized.to_vec());
+        serialized.zeroize();
 
         Ok(client_login.message.serialize().to_vec())
     }
@@ -101,7 +108,7 @@ impl Login {
         credential_response_bytes: &Vec<u8>,
         password: &str,
     ) -> Result<LoginFinishResult, AuthenticationError> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
@@ -112,6 +119,8 @@ impl Login {
 
         let client_login = ClientLogin::<DefaultCipherSuite>::deserialize(&state)
             .map_err(|_| AuthenticationError::ClientLoginStateDeserializationFailed)?;
+
+        state.zeroize();
 
         let client_login_finish = client_login
             .finish(
@@ -124,9 +133,60 @@ impl Login {
                 AuthenticationError::ClientLoginFinalizationFailed(error.to_string())
             })?;
 
-        Ok(LoginFinishResult {
-            message: client_login_finish.message.serialize().to_vec(),
-            export_key: client_login_finish.export_key.to_vec(),
-        })
+        let message = client_login_finish.message.serialize().to_vec();
+
+        let mut export_key = self
+            .export_key
+            .lock()
+            .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
+
+        *export_key = Zeroizing::new(client_login_finish.export_key.to_vec());
+
+        Ok(LoginFinishResult { message })
+    }
+
+    /// Decrypts the root key that was sealed with the export key derived from
+    /// the user's password.
+    ///
+    /// Uses the export key stored by [`finish`](Self::finish) as the symmetric
+    /// key. The export key is zeroized once the root key has been recovered, so
+    /// this method succeeds at most once per login session.
+    ///
+    /// # Arguments
+    ///
+    /// * `encrypted_root_key` - A reference to the [`EncryptedField`] holding the ciphertext and nonce of the sealed root key.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a vector of bytes representing the plaintext root
+    /// key if successful, or an [`AuthenticationError`] otherwise. The root key
+    /// never leaves the client and is suitable for decrypting the vault's key ring.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthenticationError::MutexAcquisitionFailed`] if the export key
+    /// mutex is poisoned, or [`AuthenticationError::RootKeyDecryptionFailed`] if
+    /// decryption fails. The latter also covers the case where
+    /// [`finish`](Self::finish) has not been called and no export key is
+    /// available.
+    fn unseal_root_key(
+        &self,
+        encrypted_root_key: &EncryptedField,
+    ) -> Result<Vec<u8>, AuthenticationError> {
+        let mut export_key = self
+            .export_key
+            .lock()
+            .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
+
+        let root_key = decrypt_using_symmetric_key(
+            &export_key,
+            &encrypted_root_key.field,
+            &encrypted_root_key.nonce,
+        )
+        .map_err(|_| AuthenticationError::RootKeyDecryptionFailed)?;
+
+        export_key.zeroize();
+
+        Ok(root_key)
     }
 }

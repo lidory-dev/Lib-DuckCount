@@ -2,8 +2,15 @@ use std::sync::Mutex;
 
 use opaque_ke::{ClientRegistration, ClientRegistrationFinishParameters, RegistrationResponse};
 use rand::rngs::OsRng;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuite};
+use crate::cryptography::{
+    authentication::{AuthenticationError, DefaultCipherSuite},
+    encryption::{
+        encrypt::{EncryptedTextAndNonce, encrypt_using_symmetric_key},
+        keys::generate_symmetric_encryption_key,
+    },
+};
 
 /// Represents a client-side OPAQUE registration session.
 ///
@@ -15,16 +22,18 @@ use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuit
 struct Registration {
     /// Serialized `ClientRegistration` state produced by `start` and consumed
     /// by `finish`. Empty until `start` has been called successfully.
-    state: Mutex<Vec<u8>>,
+    state: Mutex<Zeroizing<Vec<u8>>>,
 }
 
 #[derive(uniffi::Record)]
 pub struct RegistrationFinishResult {
     /// Serialized RegistrationUpload message to send to the server.
     pub message: Vec<u8>,
-    /// Export key derived from the password. Stable across registration
-    /// and login, so it can be used to derive client-side encryption keys.
-    pub export_key: Vec<u8>,
+    /// The vault root key generated for this account, used to seal the vault
+    /// key ring, before saving the vault on the server.
+    pub root_key: Vec<u8>,
+    /// The sealed root key; to be added to the user vault and sent to the server.
+    pub encrypted_root_key: EncryptedTextAndNonce,
 }
 
 #[uniffi::export]
@@ -40,7 +49,7 @@ impl Registration {
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
-            state: Mutex::new(Vec::new()),
+            state: Mutex::new(Zeroizing::new(Vec::new())),
         }
     }
 
@@ -65,8 +74,9 @@ impl Registration {
             ClientRegistration::<DefaultCipherSuite>::start(&mut rng, password.as_bytes())
                 .map_err(|_| AuthenticationError::StartingRegistrationFailed)?;
 
-        state.clear();
-        state.append(&mut client_registration.state.serialize().to_vec());
+        let mut serialized = client_registration.state.serialize();
+        *state = Zeroizing::new(serialized.to_vec());
+        serialized.zeroize();
 
         Ok(client_registration.message.serialize().to_vec())
     }
@@ -98,7 +108,7 @@ impl Registration {
         registration_response_bytes: &Vec<u8>,
         password: &str,
     ) -> Result<RegistrationFinishResult, AuthenticationError> {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
@@ -112,6 +122,8 @@ impl Registration {
         let client_registration = ClientRegistration::<DefaultCipherSuite>::deserialize(&state)
             .map_err(|_| AuthenticationError::ClientRegistrationStateDeserializationFailed)?;
 
+        state.zeroize();
+
         match client_registration.finish(
             &mut rng,
             password.as_bytes(),
@@ -119,10 +131,20 @@ impl Registration {
                 .map_err(|_| AuthenticationError::RegistrationResponseDeserializationFailed)?,
             ClientRegistrationFinishParameters::default(),
         ) {
-            Ok(result) => Ok(RegistrationFinishResult {
-                message: result.message.serialize().to_vec(),
-                export_key: result.export_key.to_vec(),
-            }),
+            Ok(result) => {
+                let message = result.message.serialize().to_vec();
+
+                let export_key = Zeroizing::new(result.export_key.to_vec());
+                let root_key = generate_symmetric_encryption_key();
+                let encrypted_root_key = encrypt_using_symmetric_key(&export_key, &root_key)
+                    .map_err(|_| AuthenticationError::RootKeyEncryptionFailed)?;
+
+                Ok(RegistrationFinishResult {
+                    message,
+                    root_key,
+                    encrypted_root_key,
+                })
+            }
             Err(_) => Err(AuthenticationError::ClientRegistrationFinalizationFailed),
         }
     }

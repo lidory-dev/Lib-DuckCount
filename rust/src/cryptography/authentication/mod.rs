@@ -34,6 +34,8 @@ pub enum AuthenticationError {
     MutexAcquisitionFailed,
     FinishCalledBeforeStart,
     CredentialResponseDeserializationFailed,
+    RootKeyEncryptionFailed,
+    RootKeyDecryptionFailed,
 }
 
 impl Display for AuthenticationError {
@@ -69,6 +71,12 @@ impl Display for AuthenticationError {
             }
             AuthenticationError::CredentialResponseDeserializationFailed => {
                 write!(f, "Could not deserialize credential response.")
+            }
+            AuthenticationError::RootKeyEncryptionFailed => {
+                write!(f, "Could not encrypt the root key.")
+            }
+            AuthenticationError::RootKeyDecryptionFailed => {
+                write!(f, "Could not decrypt the root key.")
             }
         }
     }
