@@ -5,7 +5,7 @@ use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::{
-    authentication::{AuthenticationError, DefaultCipherSuite},
+    authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
     encryption::decrypt::decrypt_using_symmetric_key,
     vault::encrypted_field::EncryptedField,
 };
@@ -17,7 +17,7 @@ use crate::cryptography::{
 /// is guarded by a [`Mutex`] so the object can be shared safely across threads
 /// via the UniFFI bindings.
 #[derive(uniffi::Object)]
-struct Login {
+pub(crate) struct Login {
     /// Serialized `ClientLogin` state produced by `start` and consumed by
     /// `finish`. Empty until `start` has been called successfully.
     state: Mutex<Zeroizing<Vec<u8>>>,
@@ -61,7 +61,7 @@ impl Login {
     ///
     /// A `Result` containing containing a vector of bytes representing the serialized message if successful,
     /// or an [AuthenticationError] otherwise.
-    fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
+    pub(crate) fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
         let mut state = self
             .state
             .lock()
@@ -103,7 +103,7 @@ impl Login {
     /// the stored state or the credential response is invalid. A failure of the
     /// finish step itself (which includes an incorrect password) yields
     /// [`AuthenticationError::ClientLoginFinalizationFailed`].
-    fn finish(
+    pub(crate) fn finish(
         &self,
         credential_response_bytes: &Vec<u8>,
         password: &str,
@@ -169,7 +169,7 @@ impl Login {
     /// decryption fails. The latter also covers the case where
     /// [`finish`](Self::finish) has not been called and no export key is
     /// available.
-    fn unseal_root_key(
+    pub(crate) fn unseal_root_key(
         &self,
         encrypted_root_key: &EncryptedField,
     ) -> Result<Vec<u8>, AuthenticationError> {
@@ -178,9 +178,12 @@ impl Login {
             .lock()
             .map_err(|_| AuthenticationError::MutexAcquisitionFailed)?;
 
+        let wrapping_key = root_key_wrapping_key(&export_key)
+            .ok_or(AuthenticationError::RootKeyDecryptionFailed)?;
+
         let root_key = decrypt_using_symmetric_key(
-            &export_key,
-            &encrypted_root_key.field,
+            &wrapping_key,
+            &encrypted_root_key.ciphertext,
             &encrypted_root_key.nonce,
         )
         .map_err(|_| AuthenticationError::RootKeyDecryptionFailed)?;

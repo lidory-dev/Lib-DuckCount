@@ -207,7 +207,7 @@ impl UserVault {
 
         let decrypted_groups_metadata = decrypt_using_symmetric_key(
             &encryption_key,
-            &self.groups_metadata.field,
+            &self.groups_metadata.ciphertext,
             &self.groups_metadata.nonce,
         )
         .map_err(|_| UserVaultError::EncryptionError(EncryptionError::DecryptionFailed))?;

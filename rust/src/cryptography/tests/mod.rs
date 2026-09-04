@@ -1,3 +1,4 @@
+mod authentication;
 mod encryption;
 mod keys;
 mod password;

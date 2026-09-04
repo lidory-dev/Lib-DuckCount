@@ -5,7 +5,7 @@ use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::{
-    authentication::{AuthenticationError, DefaultCipherSuite},
+    authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
     encryption::{
         encrypt::{EncryptedTextAndNonce, encrypt_using_symmetric_key},
         keys::generate_symmetric_encryption_key,
@@ -19,7 +19,7 @@ use crate::cryptography::{
 /// is guarded by a [`Mutex`] so the object can be shared safely across threads
 /// via the UniFFI bindings.
 #[derive(uniffi::Object)]
-struct Registration {
+pub(crate) struct Registration {
     /// Serialized `ClientRegistration` state produced by `start` and consumed
     /// by `finish`. Empty until `start` has been called successfully.
     state: Mutex<Zeroizing<Vec<u8>>>,
@@ -62,7 +62,7 @@ impl Registration {
     /// # Returns
     ///
     /// A `Result` containing `Vec<u8>` if successful, or an [AuthenticationError] otherwise.
-    fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
+    pub(crate) fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
         let mut state = self
             .state
             .lock()
@@ -103,7 +103,7 @@ impl Registration {
     /// Returns [`AuthenticationError::FinishCalledBeforeStart`] if [`start`](Self::start)
     /// has not been called, or a deserialization/finalization error if the
     /// stored state, the registration response, or the finish step is invalid.
-    fn finish(
+    pub(crate) fn finish(
         &self,
         registration_response_bytes: &Vec<u8>,
         password: &str,
@@ -135,8 +135,11 @@ impl Registration {
                 let message = result.message.serialize().to_vec();
 
                 let export_key = Zeroizing::new(result.export_key.to_vec());
+                let wrapping_key = root_key_wrapping_key(&export_key)
+                    .ok_or(AuthenticationError::RootKeyEncryptionFailed)?;
+
                 let root_key = generate_symmetric_encryption_key();
-                let encrypted_root_key = encrypt_using_symmetric_key(&export_key, &root_key)
+                let encrypted_root_key = encrypt_using_symmetric_key(&wrapping_key, &root_key)
                     .map_err(|_| AuthenticationError::RootKeyEncryptionFailed)?;
 
                 Ok(RegistrationFinishResult {

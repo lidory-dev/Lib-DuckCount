@@ -2,12 +2,15 @@ use std::fmt::Display;
 
 use argon2::Argon2;
 use opaque_ke::CipherSuite;
+use zeroize::Zeroizing;
 
-mod login;
+use crate::cryptography::encryption::keys::NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE;
+
+pub(crate) mod login;
 mod reauth;
-mod registration;
+pub(crate) mod registration;
 
-struct DefaultCipherSuite;
+pub(crate) struct DefaultCipherSuite;
 
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
@@ -20,6 +23,30 @@ impl CipherSuite for DefaultCipherSuite {
     // >;
 
     type Ksf = Argon2<'static>;
+}
+
+/// The AEAD key that seals the vault root key: the first
+/// [NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE] bytes of the OPAQUE export key.
+///
+/// The export key is wider than AES-256-GCM takes. [DefaultCipherSuite] hashes
+/// with SHA-512 (`OprfCs = Ristretto255`), so `export_key` is 64 bytes, while
+/// [encrypt_using_symmetric_key](crate::cryptography::encryption::encrypt::encrypt_using_symmetric_key)
+/// and its decrypt counterpart accept exactly 32 and reject anything else as
+/// [EncryptionError::WrongKeySize](crate::cryptography::encryption::EncryptionError::WrongKeySize).
+///
+/// # Returns
+///
+/// `None` when `export_key` is shorter than a key, which is how a **spent**
+/// export key presents itself: `Zeroize for Vec<u8>` clears the vector as well
+/// as zeroing it, so an export key consumed by
+/// [Login::unseal_root_key](login::Login::unseal_root_key) comes back empty
+/// rather than short-but-nonzero. Callers turn that into their own error, which
+/// is what keeps a second unseal a failure instead of a panic on an
+/// out-of-range slice.
+pub(crate) fn root_key_wrapping_key(export_key: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    export_key
+        .get(..NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE)
+        .map(|key| Zeroizing::new(key.to_vec()))
 }
 
 #[derive(Debug, uniffi::Error)]
