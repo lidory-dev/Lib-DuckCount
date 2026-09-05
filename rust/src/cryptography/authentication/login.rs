@@ -6,8 +6,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::{
     authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
-    encryption::decrypt::decrypt_using_symmetric_key,
-    vault::encrypted_field::EncryptedField,
+    encryption::{decrypt::decrypt_using_symmetric_key, encrypted_field::EncryptedField},
 };
 
 /// Represents a client-side OPAQUE login session.

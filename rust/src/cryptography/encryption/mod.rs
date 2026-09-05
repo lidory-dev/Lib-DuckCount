@@ -1,6 +1,7 @@
 pub mod database_encryption_key;
 pub mod decrypt;
 pub mod encrypt;
+pub mod encrypted_field;
 pub mod keys;
 
 use std::fmt::Display;

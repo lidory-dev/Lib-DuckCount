@@ -7,7 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::cryptography::{
     authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
     encryption::{
-        encrypt::{EncryptedTextAndNonce, encrypt_using_symmetric_key},
+        encrypt::encrypt_using_symmetric_key, encrypted_field::EncryptedField,
         keys::generate_symmetric_encryption_key,
     },
 };
@@ -25,7 +25,7 @@ pub(crate) struct Registration {
     state: Mutex<Zeroizing<Vec<u8>>>,
 }
 
-#[derive(uniffi::Record)]
+#[derive(uniffi::Object)]
 pub struct RegistrationFinishResult {
     /// Serialized RegistrationUpload message to send to the server.
     pub message: Vec<u8>,
@@ -33,7 +33,23 @@ pub struct RegistrationFinishResult {
     /// key ring, before saving the vault on the server.
     pub root_key: Vec<u8>,
     /// The sealed root key; to be added to the user vault and sent to the server.
-    pub encrypted_root_key: EncryptedTextAndNonce,
+    pub encrypted_root_key: EncryptedField,
+}
+
+/// RegistrationFinishResult getters.
+#[uniffi::export]
+impl RegistrationFinishResult {
+    fn message(&self) -> Vec<u8> {
+        self.message.clone()
+    }
+
+    fn root_key(&self) -> Vec<u8> {
+        self.root_key.clone()
+    }
+
+    fn encrypted_root_key(&self) -> EncryptedField {
+        self.encrypted_root_key.clone()
+    }
 }
 
 #[uniffi::export]

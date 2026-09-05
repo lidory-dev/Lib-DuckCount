@@ -62,7 +62,7 @@ mod tests {
         let encrypted = encrypt_using_symmetric_key(&key, &plaintext).unwrap();
 
         let decrypted =
-            decrypt_using_symmetric_key(&key, &encrypted.cipher_text, &encrypted.nonce).unwrap();
+            decrypt_using_symmetric_key(&key, &encrypted.ciphertext, &encrypted.nonce).unwrap();
 
         assert_eq!(decrypted, plaintext);
     }
@@ -77,12 +77,12 @@ mod tests {
 
         // Wrong key should fail.
         assert!(
-            decrypt_using_symmetric_key(&wrong_key, &encrypted.cipher_text, &encrypted.nonce)
+            decrypt_using_symmetric_key(&wrong_key, &encrypted.ciphertext, &encrypted.nonce)
                 .is_err()
         );
 
         // Corrupted ciphertext should fail.
-        let mut corrupted_ciphertext = encrypted.cipher_text.clone();
+        let mut corrupted_ciphertext = encrypted.ciphertext.clone();
         corrupted_ciphertext[0] ^= 0xFF;
         assert!(
             decrypt_using_symmetric_key(&key, &corrupted_ciphertext, &encrypted.nonce).is_err()
@@ -90,6 +90,6 @@ mod tests {
 
         // Wrong nonce should fail.
         let wrong_nonce = Aes256Gcm::generate_nonce(&mut OsRng).to_vec();
-        assert!(decrypt_using_symmetric_key(&key, &encrypted.cipher_text, &wrong_nonce).is_err());
+        assert!(decrypt_using_symmetric_key(&key, &encrypted.ciphertext, &wrong_nonce).is_err());
     }
 }

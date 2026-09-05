@@ -8,10 +8,11 @@ mod tests {
 
     use crate::cryptography::{
         authentication::{
-            AuthenticationError, DefaultCipherSuite, login::Login, registration::Registration,
-            registration::RegistrationFinishResult,
+            AuthenticationError, DefaultCipherSuite,
+            login::Login,
+            registration::{Registration, RegistrationFinishResult},
         },
-        vault::encrypted_field::EncryptedField,
+        encryption::encrypted_field::EncryptedField,
     };
 
     const USERNAME: &str = "duckcountgreatestuser";
@@ -103,7 +104,7 @@ mod tests {
         let login = log_in(&server_setup, PASSWORD, &password_file);
 
         let sealed_root_key = EncryptedField::from_parts(
-            &registration_result.encrypted_root_key.cipher_text,
+            &registration_result.encrypted_root_key.ciphertext,
             &registration_result.encrypted_root_key.nonce,
         );
 
@@ -127,7 +128,7 @@ mod tests {
         let login = log_in(&server_setup, PASSWORD, &password_file);
 
         let sealed_root_key = EncryptedField::from_parts(
-            &registration_result.encrypted_root_key.cipher_text,
+            &registration_result.encrypted_root_key.ciphertext,
             &registration_result.encrypted_root_key.nonce,
         );
 
@@ -155,7 +156,7 @@ mod tests {
         let login = log_in(&server_setup, OTHER_PASSWORD, &other_password_file);
 
         let sealed_root_key = EncryptedField::from_parts(
-            &registration_result.encrypted_root_key.cipher_text,
+            &registration_result.encrypted_root_key.ciphertext,
             &registration_result.encrypted_root_key.nonce,
         );
 
@@ -175,7 +176,7 @@ mod tests {
         let (registration_result, _) = register(&server_setup, PASSWORD);
 
         let sealed_root_key = EncryptedField::from_parts(
-            &registration_result.encrypted_root_key.cipher_text,
+            &registration_result.encrypted_root_key.ciphertext,
             &registration_result.encrypted_root_key.nonce,
         );
 

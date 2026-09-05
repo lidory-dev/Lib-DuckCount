@@ -4,17 +4,11 @@ use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
 use aes_siv::{Aes256SivAead, Key as KeySiv, Nonce as NonceSiv};
 use rand::rngs::OsRng;
 
+use crate::cryptography::encryption::encrypted_field::EncryptedField;
 use crate::cryptography::encryption::keys::{
     DETERMINISTIC_ENCRYPTION_KEY_SIZE, NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE,
 };
 use crate::cryptography::encryption::{EncryptionError, FIXED_NONCE};
-
-/// Encrypted cipher text and its nonce.
-#[derive(uniffi::Record)]
-pub struct EncryptedTextAndNonce {
-    pub cipher_text: Vec<u8>,
-    pub nonce: Vec<u8>,
-}
 
 /// Encrypts plaintext deterministically using a symmetric key and a fixed nonce.
 ///
@@ -116,7 +110,7 @@ pub fn encrypt_deterministically_using_symmetric_key(
 pub fn encrypt_using_symmetric_key(
     key: &Vec<u8>,
     plaintext_message: &Vec<u8>,
-) -> Result<EncryptedTextAndNonce, EncryptionError> {
+) -> Result<EncryptedField, EncryptionError> {
     let key: [u8; NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE] = key
         .to_owned()
         .try_into()
@@ -129,12 +123,12 @@ pub fn encrypt_using_symmetric_key(
 
     let nonce = Aes256Gcm::generate_nonce(&mut rng);
 
-    let cipher_text = cipher
+    let ciphertext = cipher
         .encrypt(&nonce, plaintext_message.as_ref())
         .map_err(|_| EncryptionError::EncryptionFailed)?;
 
-    Ok(EncryptedTextAndNonce {
-        cipher_text,
+    Ok(EncryptedField {
+        ciphertext,
         nonce: nonce.to_vec(),
     })
 }
