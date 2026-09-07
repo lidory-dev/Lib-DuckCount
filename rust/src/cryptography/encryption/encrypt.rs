@@ -104,7 +104,7 @@ pub fn encrypt_deterministically_using_symmetric_key(
 /// let plaintext = b"hello world".to_vec();
 /// let encrypted = encrypt_using_symmetric_key(&key, &plaintext).unwrap();
 ///
-/// println!("Ciphertext: {:?}, Nonce: {:?}", encrypted.cipher_text, encrypted.nonce);
+/// println!("Ciphertext: {:?}, Nonce: {:?}", encrypted.ciphertext, encrypted.nonce);
 /// ```
 #[uniffi::export]
 pub fn encrypt_using_symmetric_key(

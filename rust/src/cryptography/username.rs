@@ -1,5 +1,6 @@
-use sha3::{Digest, Sha3_512};
 use thiserror::Error;
+
+use crate::cryptography::hashing::hash_with_domain;
 
 /// Maximum number of characters allowed in a username.
 const USERNAME_MAXIMUM_LENGTH: usize = 32;
@@ -148,7 +149,7 @@ pub fn hash_discovery_username(username: &str) -> Result<String, UsernameError> 
 
     Ok(hash_with_domain(
         DISCOVERY_USERNAME_DOMAIN,
-        &normalized_username,
+        normalized_username.as_bytes(),
     ))
 }
 
@@ -185,20 +186,6 @@ pub fn hash_login_username(username: &str) -> Result<String, UsernameError> {
 
     Ok(hash_with_domain(
         LOGIN_USERNAME_DOMAIN,
-        &normalized_username,
+        normalized_username.as_bytes(),
     ))
-}
-
-/// Hashes `value` under `domain` with SHA3-512, hexadecimal encoded.
-fn hash_with_domain(domain: &str, value: &str) -> String {
-    let mut hasher = Sha3_512::new();
-
-    hasher.update(domain.as_bytes());
-    hasher.update(value.as_bytes());
-
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }

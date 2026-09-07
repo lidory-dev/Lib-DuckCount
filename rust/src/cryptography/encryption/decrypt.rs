@@ -107,7 +107,7 @@ pub fn decrypt_deterministically_using_symmetric_key(
 /// let encrypted = encrypt_using_symmetric_key(&key, &plaintext).unwrap();
 ///
 /// let decrypted =
-///     decrypt_using_symmetric_key(&key, &encrypted.cipher_text, &encrypted.nonce).unwrap();
+///     decrypt_using_symmetric_key(&key, &encrypted.ciphertext, &encrypted.nonce).unwrap();
 ///
 /// println!("Decrypted text: {:?}", decrypted);
 /// ```
