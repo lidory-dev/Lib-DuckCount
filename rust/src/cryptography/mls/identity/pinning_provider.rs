@@ -1,4 +1,5 @@
-//! Identity provider binding user UUIDs to signature keys on first use.
+//! Identity provider checking each user UUID against the signature key pinned
+//! for it.
 //!
 //! # Why this exists
 //!
@@ -9,11 +10,23 @@
 //! message in the group. That would make the server a trusted party, which the
 //! rest of DuckCount deliberately avoids.
 //!
-//! Pinning closes the gap without a PKI. The first signature key seen for a
-//! user UUID is remembered; every later appearance must match it. A server that
-//! swaps in its own key is rejected the moment it tries, and a user who
-//! legitimately rotates their key has to be re-verified out of band (see
-//! [`super::fingerprint`]).
+//! Pinning closes the gap without a PKI. The signature key a user is first
+//! invited or joined with is remembered; every later appearance must match it.
+//! A server that swaps in its own key is rejected the moment it tries, and a
+//! user who legitimately rotates their key has to be re-verified out of band
+//! (see [`super::fingerprint`]).
+//!
+//! # Who gets pinned
+//!
+//! This provider only checks. mls-rs consults it for every leaf of every tree,
+//! Welcome and commit it validates, often before the signatures around that
+//! leaf are checked, and a tree is only its author's word for who everybody
+//! else in it is. Pinning from here would let whoever wrote a Welcome decide
+//! the keys of people this user has never met.
+//!
+//! Pins are written instead once an operation has succeeded, and only for the
+//! users the host named: the invitees it fetched key packages for, and the
+//! members it expected when joining.
 
 use mls_rs::ExtensionList;
 use mls_rs::identity::{CredentialType, SigningIdentity};
@@ -25,14 +38,14 @@ use crate::cryptography::mls::{
 };
 
 /// Identity provider that accepts basic credentials holding a user UUID, and
-/// pins the signature key each UUID first appeared with.
+/// rejects any signature key differing from the one pinned for that UUID.
 #[derive(Clone)]
 pub struct PinningIdentityProvider {
     pins: IdentityPinStore,
 }
 
 impl PinningIdentityProvider {
-    /// Creates a provider recording its pins in `pins`.
+    /// Creates a provider checking members against `pins`.
     pub fn new(pins: IdentityPinStore) -> Self {
         Self { pins }
     }
@@ -50,7 +63,7 @@ impl IdentityProvider for PinningIdentityProvider {
         let user_uuid = user_uuid_from(&signing_identity.credential)?;
 
         self.pins
-            .verify_or_pin(&user_uuid, signing_identity.signature_key.as_ref())
+            .verify(&user_uuid, signing_identity.signature_key.as_ref())
     }
 
     fn validate_external_sender(
@@ -85,8 +98,9 @@ impl IdentityProvider for PinningIdentityProvider {
         // and nobody else, so the answer is whether both identities name the
         // same user.
         //
-        // This does not let a member quietly swap their signature key: the new
-        // leaf still goes through `validate_member`, where the pin decides.
+        // This does not let a pinned member quietly swap their signature key:
+        // the new leaf still goes through `validate_member`, where the pin
+        // decides.
         Ok(user_uuid_from(&predecessor.credential)? == user_uuid_from(&successor.credential)?)
     }
 

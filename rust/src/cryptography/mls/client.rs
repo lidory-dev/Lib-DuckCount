@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use mls_rs::identity::SigningIdentity;
-use mls_rs::{Client, ExtensionList, MlsMessage};
+use mls_rs::{Client, ExtensionList, Group, MlsMessage};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -13,12 +13,12 @@ use crate::cryptography::mls::{
     config::{DuckCountMlsConfig, build_client},
     group::MlsGroup,
     identity::{
-        credential::credential_for,
+        credential::{credential_for, user_uuid_from},
         fingerprint::fingerprint,
         pinning_provider::PinningIdentityProvider,
         signature_key::{self, SignatureKeyPair},
     },
-    invitation::{match_welcomes, validate_invitees},
+    invitation::{match_welcomes, pin_invitees, validate_invitees},
     key_package::generate_key_packages::generate_key_packages,
     storage::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
@@ -204,6 +204,7 @@ impl MlsClient {
     ///
     /// The group exists locally as soon as this returns. If the server rejects
     /// the request, call [`delete_group`](Self::delete_group) to discard it.
+    /// Each invitee's signature key is pinned to them either way.
     ///
     /// # Arguments
     ///
@@ -267,6 +268,8 @@ impl MlsClient {
         // orphaned state behind for the host to clean up blind.
         let welcomes = match_welcomes(&commit_output.welcome_messages, &invitees)?;
 
+        pin_invitees(&self.pins, &invitees)?;
+
         // Applying immediately is safe here, and only here: this user is the
         // only member, so no other view of the group can diverge from it.
         group.apply_pending_commit()?;
@@ -280,9 +283,21 @@ impl MlsClient {
 
     /// Joins a group from a Welcome message.
     ///
+    /// A Welcome is its author's word for who is in the group, so it is only
+    /// accepted when the group holds exactly this user and `expected_members`,
+    /// the users the host knows the Welcome to be about (for a contact
+    /// request, its sender as the server authenticated them). Those members'
+    /// signature keys are then pinned to them, and nobody else's is.
+    ///
+    /// A Welcome for a group this device has already joined is refused, even
+    /// once the group is deleted. A last-resort key package survives the joins
+    /// it serves, so the same Welcome can be replayed, and joining it again
+    /// would put the group back at the epoch the Welcome was for.
+    ///
     /// # Arguments
     ///
     /// * `welcome` - The Welcome ciphertext drained from the group's messages.
+    /// * `expected_members` - The UUIDs of every member other than this user.
     ///
     /// # Returns
     ///
@@ -294,16 +309,35 @@ impl MlsClient {
     /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::UnexpectedMembers` - If the group's members are not exactly
+    ///   this user and `expected_members`.
+    /// * `MlsError::GroupAlreadyJoined` - If this device has joined the group before.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the Welcome is not addressed to this
-    ///   user, or its key package has already been used.
+    ///   user, or its one-time key package has already been used.
     /// * `MlsError::StorageFailed` - If the joined group cannot be stored.
-    pub fn join_group(&self, welcome: Vec<u8>) -> Result<Vec<u8>, MlsError> {
+    pub fn join_group(
+        &self,
+        welcome: Vec<u8>,
+        expected_members: Vec<String>,
+    ) -> Result<Vec<u8>, MlsError> {
         let welcome = MlsMessage::from_bytes(&welcome).map_err(|_| MlsError::InvalidMessage)?;
 
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
+        // Joined in memory only: mls-rs stores nothing, and spends no key
+        // package, until `write_to_storage`.
         let (mut group, _) = client.join_group(None, &welcome, None)?;
+
+        if self.group_states.has_held(group.group_id())? {
+            return Err(MlsError::GroupAlreadyJoined);
+        }
+
+        for (user_uuid, signature_key) in self.expected_peers(&group, expected_members)? {
+            self.pins
+                .verify_or_pin(&user_uuid, signature_key.as_ref())?;
+        }
 
         group.write_to_storage()?;
 
@@ -331,7 +365,7 @@ impl MlsClient {
 
         let group = client.load_group(&mls_group_id)?;
 
-        Ok(Arc::new(MlsGroup::new(group)))
+        Ok(Arc::new(MlsGroup::new(group, self.pins.clone())))
     }
 
     /// Deletes a group's stored state and every retained prior epoch.
@@ -407,8 +441,8 @@ impl MlsClient {
         self.pins.verify_or_pin(&user_uuid, &signature_key)
     }
 
-    /// Forgets the signature key pinned for a user, so the next one seen is
-    /// accepted and pinned afresh.
+    /// Forgets the signature key pinned for a user, so the next one they are
+    /// invited or joined with is pinned afresh.
     ///
     /// # Warning
     ///
@@ -473,5 +507,45 @@ impl MlsClient {
             pins,
             group_states,
         })
+    }
+
+    /// The members of a joined group other than this user, with their
+    /// signature keys, provided the group holds exactly this user and
+    /// `expected_members`.
+    ///
+    /// Comparing sorted lists is exact because mls-rs refuses a tree in which
+    /// two leaves share an identity, so each UUID appears on the roster once.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::UnexpectedMembers` - If the members differ from the expected ones.
+    fn expected_peers(
+        &self,
+        group: &Group<DuckCountMlsConfig>,
+        mut expected_members: Vec<String>,
+    ) -> Result<Vec<(String, SignaturePublicKey)>, MlsError> {
+        let mut roster = Vec::new();
+        let mut peers = Vec::new();
+
+        for member in group.roster().members() {
+            let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+
+            roster.push(user_uuid.clone());
+
+            if member.index != group.current_member_index() {
+                peers.push((user_uuid, member.signing_identity.signature_key));
+            }
+        }
+
+        roster.sort_unstable();
+
+        expected_members.push(self.user_uuid.clone());
+        expected_members.sort_unstable();
+
+        if roster != expected_members {
+            return Err(MlsError::UnexpectedMembers);
+        }
+
+        Ok(peers)
     }
 }

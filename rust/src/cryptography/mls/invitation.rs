@@ -4,19 +4,22 @@
 //! fetches one key package per invitee from the server, this module checks each
 //! one really belongs to the user it was fetched for, and the Welcomes the
 //! commit produces are matched back to those users so the DuckCount API can
-//! address each one individually.
+//! address each one individually. Once the commit is built, each invitee's
+//! signature key is pinned to them.
 
 use mls_rs::{CryptoProvider, MlsMessage};
 
 use crate::cryptography::mls::{
     CIPHER_SUITE, MlsError, config::crypto_provider, identity::credential::user_uuid_from,
-    types::InviteeKeyPackage,
+    storage::identity_pin::IdentityPinStore, types::InviteeKeyPackage,
 };
 
-/// One validated invitee: the user, and the key package they will join with.
+/// One validated invitee: the user, the key package they will join with, and
+/// the signature key it carries.
 pub struct Invitee {
     pub user_uuid: String,
     pub key_package: MlsMessage,
+    pub signature_key: Vec<u8>,
 }
 
 /// Parses and checks the key packages the host fetched for a set of invitees.
@@ -62,12 +65,33 @@ pub fn validate_invitees(invitees: Vec<InviteeKeyPackage>) -> Result<Vec<Invitee
                 return Err(MlsError::InvalidCredential);
             }
 
+            let signature_key = key_package.signing_identity().signature_key.to_vec();
+
             Ok(Invitee {
                 user_uuid: invitee.user_uuid,
                 key_package: message,
+                signature_key,
             })
         })
         .collect()
+}
+
+/// Pins each invitee's signature key to their user UUID.
+///
+/// Call this once the commit adding them has been built: mls-rs checks each
+/// key package's signature while building it, and pinning any earlier would
+/// remember a key nobody has proved they hold.
+///
+/// # Errors
+///
+/// * `MlsError::IdentityKeyMismatch` - If a different key is already pinned for
+///   an invitee.
+/// * `MlsError::StorageFailed` - If the host storage fails.
+/// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+pub fn pin_invitees(pins: &IdentityPinStore, invitees: &[Invitee]) -> Result<(), MlsError> {
+    invitees
+        .iter()
+        .try_for_each(|invitee| pins.verify_or_pin(&invitee.user_uuid, &invitee.signature_key))
 }
 
 /// Matches each Welcome message produced by a commit back to the invitee it was

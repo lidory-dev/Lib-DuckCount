@@ -156,12 +156,25 @@ mod tests {
                 .find(|welcome| welcome.user_uuid == user.uuid)
                 .expect("every invitee gets a welcome");
 
-            let group_id = user.client.join_group(welcome.welcome.clone()).unwrap();
+            let others = std::iter::once(creator)
+                .chain(invitees.iter().copied())
+                .filter(|other| other.uuid != user.uuid)
+                .collect::<Vec<_>>();
+
+            let group_id = user
+                .client
+                .join_group(welcome.welcome.clone(), uuids(&others))
+                .unwrap();
 
             groups.push(user.client.load_group(group_id).unwrap());
         }
 
         groups
+    }
+
+    /// The UUIDs of `users`, as a joiner names the members they expect.
+    fn uuids(users: &[&TestUser]) -> Vec<String> {
+        users.iter().map(|user| user.uuid.clone()).collect()
     }
 
     fn member_uuids(group: &MlsGroup) -> Vec<String> {
@@ -232,6 +245,14 @@ mod tests {
 
         let output = alice_group.add_members(vec![carol.invitation()]).unwrap();
 
+        assert_eq!(
+            alice
+                .client
+                .pinned_signature_key(carol.uuid.clone())
+                .unwrap(),
+            Some(carol.client.signature_public_key())
+        );
+
         // The commit is pending until the server accepts it.
         assert!(alice_group.has_pending_commit().unwrap());
         assert_eq!(alice_group.epoch().unwrap(), epoch_before);
@@ -249,7 +270,7 @@ mod tests {
 
         let carol_group_id = carol
             .client
-            .join_group(output.welcomes[0].welcome.clone())
+            .join_group(output.welcomes[0].welcome.clone(), uuids(&[&alice, &bob]))
             .unwrap();
         let carol_group = carol.client.load_group(carol_group_id).unwrap();
 
@@ -341,18 +362,235 @@ mod tests {
                 .find(|welcome| welcome.user_uuid == user.uuid)
                 .expect("every invitee gets a welcome");
 
-            assert!(user.client.join_group(welcome.welcome.clone()).is_ok());
+            let others = std::iter::once(&alice)
+                .chain(&invitees)
+                .filter(|other| other.uuid != user.uuid)
+                .collect::<Vec<_>>();
 
             let someone_else = &creation.welcomes[(index + 1) % creation.welcomes.len()];
 
             if someone_else.user_uuid != user.uuid {
                 assert!(
                     user.client
-                        .join_group(someone_else.welcome.clone())
+                        .join_group(someone_else.welcome.clone(), uuids(&others))
                         .is_err()
                 );
             }
+
+            assert!(
+                user.client
+                    .join_group(welcome.welcome.clone(), uuids(&others))
+                    .is_ok()
+            );
         }
+    }
+
+    #[test]
+    fn test_joining_pins_the_expected_members() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        establish_group(&alice, &[&bob, &carol]);
+
+        for (member, key) in [
+            (&alice, alice.client.signature_public_key()),
+            (&carol, carol.client.signature_public_key()),
+        ] {
+            assert_eq!(
+                bob.client
+                    .pinned_signature_key(member.uuid.clone())
+                    .unwrap(),
+                Some(key)
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_welcome_with_unexpected_members_is_refused_and_leaves_nothing() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let creation = alice
+            .client
+            .create_group(vec![bob.invitation(), carol.invitation()])
+            .unwrap();
+
+        let welcome = creation
+            .welcomes
+            .iter()
+            .find(|welcome| welcome.user_uuid == bob.uuid)
+            .unwrap();
+
+        // Bob was told this is a group with Alice alone.
+        let error = bob
+            .client
+            .join_group(welcome.welcome.clone(), uuids(&[&alice]))
+            .expect_err("a group holding somebody unexpected must be refused");
+
+        assert!(matches!(error, MlsError::UnexpectedMembers));
+
+        assert!(matches!(
+            bob.client
+                .load_group(creation.mls_group_id.clone())
+                .unwrap_err(),
+            MlsError::GroupNotFound
+        ));
+
+        for member in [&alice, &carol] {
+            assert!(
+                bob.client
+                    .pinned_signature_key(member.uuid.clone())
+                    .unwrap()
+                    .is_none(),
+                "a refused Welcome pins nobody"
+            );
+        }
+
+        // Nothing was spent either: the same Welcome still opens once the
+        // expectation is right.
+        assert!(
+            bob.client
+                .join_group(welcome.welcome.clone(), uuids(&[&alice, &carol]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_a_member_claiming_somebody_else_is_refused_and_not_pinned() {
+        // Mallory writes a Welcome in which her own leaf claims to be Xavier,
+        // and sends it to Victor. The server authenticated the sender as
+        // Mallory, so that is who Victor expects.
+        let mallory = TestUser::new();
+        let xavier = TestUser::new();
+        let victor = TestUser::new();
+
+        let posing_as_xavier =
+            MlsClient::new(xavier.uuid.clone(), SECRET.to_vec(), TestStore::new()).unwrap();
+
+        let creation = posing_as_xavier
+            .create_group(vec![victor.invitation()])
+            .unwrap();
+
+        let error = victor
+            .client
+            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&mallory]))
+            .expect_err("a leaf claiming somebody other than the sender must be refused");
+
+        assert!(matches!(error, MlsError::UnexpectedMembers));
+
+        assert!(
+            victor
+                .client
+                .pinned_signature_key(xavier.uuid.clone())
+                .unwrap()
+                .is_none(),
+            "the key Mallory made up for Xavier is not remembered as his"
+        );
+
+        // So the real Xavier is still recognised when he shows up.
+        establish_group(&xavier, &[&victor]);
+
+        assert_eq!(
+            victor
+                .client
+                .pinned_signature_key(xavier.uuid.clone())
+                .unwrap(),
+            Some(xavier.client.signature_public_key())
+        );
+    }
+
+    #[test]
+    fn test_a_welcome_from_an_impostor_of_a_pinned_member_is_refused() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        // Alice meets Bob, pinning his signature key.
+        establish_group(&alice, &[&bob]);
+
+        let posing_as_bob =
+            MlsClient::new(bob.uuid.clone(), SECRET.to_vec(), TestStore::new()).unwrap();
+
+        let creation = posing_as_bob
+            .create_group(vec![alice.invitation()])
+            .unwrap();
+
+        let error = alice
+            .client
+            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&bob]))
+            .expect_err("a Welcome signed with a key other than Bob's pinned one must be refused");
+
+        assert!(matches!(error, MlsError::IdentityKeyMismatch(uuid) if uuid == bob.uuid));
+    }
+
+    #[test]
+    fn test_a_welcome_is_never_joined_twice() {
+        // A last-resort key package survives the joins it serves, so a Welcome
+        // sealed to one can be delivered again, by a retry or by a server
+        // replaying it. Joining it twice would rewind the group.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let last_resort = InviteeKeyPackage {
+            user_uuid: bob.uuid.clone(),
+            key_package: bob
+                .client
+                .generate_key_packages(0)
+                .unwrap()
+                .last_resort_key_package,
+        };
+
+        let creation = alice.client.create_group(vec![last_resort]).unwrap();
+        let welcome = creation.welcomes[0].welcome.clone();
+
+        let group_id = bob
+            .client
+            .join_group(welcome.clone(), uuids(&[&alice]))
+            .unwrap();
+
+        let alice_group = alice.client.load_group(group_id.clone()).unwrap();
+
+        let first = alice_group
+            .encrypt_application_message(b"first".to_vec())
+            .unwrap();
+
+        bob.client
+            .load_group(group_id.clone())
+            .unwrap()
+            .process_incoming_message(first.clone())
+            .unwrap();
+
+        let error = bob
+            .client
+            .join_group(welcome.clone(), uuids(&[&alice]))
+            .expect_err("a Welcome for a group already held must be refused");
+
+        assert!(matches!(error, MlsError::GroupAlreadyJoined));
+
+        // Bob's group was left where it was: the message it already read stays
+        // spent, and the next one opens.
+        let bob_group = bob.client.load_group(group_id.clone()).unwrap();
+
+        assert!(bob_group.process_incoming_message(first.clone()).is_err());
+
+        let second = alice_group
+            .encrypt_application_message(b"second".to_vec())
+            .unwrap();
+
+        assert!(bob_group.process_incoming_message(second).is_ok());
+
+        // Deleting the group does not make its Welcome a way back in, which
+        // would let the first message be read a second time.
+        drop(bob_group);
+        bob.client.delete_group(group_id).unwrap();
+
+        let error = bob
+            .client
+            .join_group(welcome, uuids(&[&alice]))
+            .expect_err("a Welcome for a deleted group must be refused");
+
+        assert!(matches!(error, MlsError::GroupAlreadyJoined));
     }
 
     #[test]
@@ -718,7 +956,7 @@ mod tests {
         assert!(
             carol
                 .client
-                .join_group(output.welcomes[0].welcome.clone())
+                .join_group(output.welcomes[0].welcome.clone(), uuids(&[&alice, &bob]))
                 .is_ok()
         );
     }

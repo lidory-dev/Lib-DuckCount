@@ -41,7 +41,8 @@ use crate::cryptography::mls::{
     MlsError,
     config::DuckCountMlsConfig,
     identity::{credential::user_uuid_from, fingerprint::fingerprint},
-    invitation::{match_welcomes, validate_invitees},
+    invitation::{match_welcomes, pin_invitees, validate_invitees},
+    storage::identity_pin::IdentityPinStore,
     types::{AddMembersOutput, InviteeKeyPackage, MemberInfo, ProcessedMessage},
 };
 
@@ -54,6 +55,7 @@ use crate::cryptography::mls::{
 #[derive(uniffi::Object)]
 pub struct MlsGroup {
     group: Mutex<Group<DuckCountMlsConfig>>,
+    pins: IdentityPinStore,
 }
 
 #[uniffi::export]
@@ -119,7 +121,8 @@ impl MlsGroup {
     ///
     /// Produces the Commit for the members already in the group and one Welcome
     /// per new member, exactly the body of `POST /groups/{uuid}/members`. The
-    /// Commit stays pending until the server accepts it.
+    /// Commit stays pending until the server accepts it. Each new member's
+    /// signature key is pinned to them either way.
     ///
     /// # Arguments
     ///
@@ -157,11 +160,16 @@ impl MlsGroup {
 
         let commit_output = commit_builder.build()?;
 
+        // Matched before anything is persisted, as in `MlsClient::create_group`.
+        let welcomes = match_welcomes(&commit_output.welcome_messages, &invitees)?;
+
+        pin_invitees(&self.pins, &invitees)?;
+
         group.write_to_storage()?;
 
         Ok(AddMembersOutput {
             commit: commit_output.commit_message.to_bytes()?,
-            welcomes: match_welcomes(&commit_output.welcome_messages, &invitees)?,
+            welcomes,
         })
     }
 
@@ -414,10 +422,11 @@ impl std::fmt::Debug for MlsGroup {
 }
 
 impl MlsGroup {
-    /// Wraps a loaded mls-rs group.
-    pub(crate) fn new(group: Group<DuckCountMlsConfig>) -> Self {
+    /// Wraps a loaded mls-rs group, pinning the members it adds in `pins`.
+    pub(crate) fn new(group: Group<DuckCountMlsConfig>, pins: IdentityPinStore) -> Self {
         MlsGroup {
             group: Mutex::new(group),
+            pins,
         }
     }
 

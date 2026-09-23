@@ -44,7 +44,7 @@ use mls_rs_core::error::IntoAnyError;
 pub const CIPHER_SUITE: CipherSuite = CipherSuite::ML_KEM_768_X25519;
 
 /// MLS related errors.
-#[derive(Debug, uniffi::Error)]
+#[derive(Debug, Clone, uniffi::Error)]
 pub enum MlsError {
     /// The host's storage callback failed.
     StorageFailed(String),
@@ -72,6 +72,13 @@ pub enum MlsError {
     UnmatchedWelcome(String),
     /// No group with the given MLS group id is stored locally.
     GroupNotFound,
+    /// A Welcome is for a group this device has already joined, whether it
+    /// still holds it or deleted it since. Joining it again would put that
+    /// group back at the epoch the Welcome was for.
+    GroupAlreadyJoined,
+    /// A Welcome is for a group whose members are not exactly this user and
+    /// the ones the host expected.
+    UnexpectedMembers,
     /// No member of the group holds the given user UUID.
     MemberNotFound(String),
     /// An MLS message could not be decoded.
@@ -100,6 +107,10 @@ impl Display for MlsError {
                 write!(f, "No Welcome message was produced for user {}.", user_uuid)
             }
             MlsError::GroupNotFound => write!(f, "MLS group not found."),
+            MlsError::GroupAlreadyJoined => write!(f, "MLS group already joined."),
+            MlsError::UnexpectedMembers => {
+                write!(f, "The MLS group does not hold the expected members.")
+            }
             MlsError::MemberNotFound(user_uuid) => {
                 write!(f, "User {} is not a member of this group.", user_uuid)
             }
@@ -119,14 +130,16 @@ impl IntoAnyError for MlsError {
 
 impl From<mls_rs::error::MlsError> for MlsError {
     fn from(error: mls_rs::error::MlsError) -> Self {
-        // A pinned-key mismatch originates in our identity provider, but mls-rs
-        // wraps it before it reaches the caller. Unwrap it so the host still
-        // sees the actionable variant rather than an opaque protocol failure.
-        if let mls_rs::error::MlsError::IdentityProviderError(any_error) = &error
-            && let Some(MlsError::IdentityKeyMismatch(user_uuid)) =
-                any_error.inner_dyn_error().downcast_ref::<MlsError>()
+        // Our identity provider and storage adapters fail with our own errors,
+        // which mls-rs wraps before they reach the caller. Unwrap them so the
+        // host still sees the actionable variant, a pin mismatch or a storage
+        // failure worth retrying, rather than an opaque protocol failure.
+        if let mls_rs::error::MlsError::IdentityProviderError(any_error)
+        | mls_rs::error::MlsError::GroupStorageError(any_error)
+        | mls_rs::error::MlsError::KeyPackageRepoError(any_error) = &error
+            && let Some(ours) = any_error.inner_dyn_error().downcast_ref::<MlsError>()
         {
-            return MlsError::IdentityKeyMismatch(user_uuid.clone());
+            return ours.clone();
         }
 
         if matches!(error, mls_rs::error::MlsError::GroupNotFound) {

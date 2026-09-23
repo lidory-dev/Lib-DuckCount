@@ -18,6 +18,10 @@ use crate::cryptography::mls::{
 /// in-memory provider retains.
 const MAX_EPOCH_RETENTION: usize = 3;
 
+/// Prefix of the [`MlsNamespace::Metadata`] key recording that a group was
+/// deleted. The group id follows it.
+const DELETED_GROUP_PREFIX: &[u8] = b"deleted-group/";
+
 /// Group state storage that seals every record before the host sees it.
 ///
 /// All clones share the same underlying host store.
@@ -33,16 +37,54 @@ impl SealedGroupStateStorage {
         Self { store, sealing_key }
     }
 
+    /// Whether this device holds a group with this id, or held one and deleted
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    pub fn has_held(&self, group_id: &[u8]) -> Result<bool, MlsError> {
+        for (namespace, key) in [
+            (MlsNamespace::GroupState, group_id.to_vec()),
+            (MlsNamespace::Metadata, Self::deleted_group_key(group_id)),
+        ] {
+            let record = self
+                .store
+                .get(namespace, key)
+                .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
+            if record.is_some() {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     /// Deletes a group's current state and every retained prior epoch.
     ///
     /// Group state is deliberately *not* removed by the protocol when the local
     /// member is removed from a group, so callers that want the secrets gone
     /// have to ask.
     ///
+    /// That the group existed is kept, see [`has_held`](Self::has_held): the
+    /// key package its Welcome was sealed to can outlive it, a last-resort one
+    /// is never spent, and the Welcome must not bring the group back. The
+    /// record is written first, so a delete that fails leaves the group either
+    /// stored or remembered, never joinable again.
+    ///
     /// # Errors
     ///
     /// * `MlsError::StorageFailed` - If the host storage fails.
     pub fn delete_group(&self, group_id: &[u8]) -> Result<(), MlsError> {
+        self.store
+            .put(
+                MlsNamespace::Metadata,
+                Self::deleted_group_key(group_id),
+                Vec::new(),
+            )
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
         for key in self.epoch_keys(group_id)? {
             self.store
                 .delete(MlsNamespace::GroupEpoch, key)
@@ -52,6 +94,11 @@ impl SealedGroupStateStorage {
         self.store
             .delete(MlsNamespace::GroupState, group_id.to_vec())
             .map_err(|error| MlsError::StorageFailed(error.to_string()))
+    }
+
+    /// Builds the store key recording that a group was deleted.
+    fn deleted_group_key(group_id: &[u8]) -> Vec<u8> {
+        [DELETED_GROUP_PREFIX, group_id].concat()
     }
 
     /// Builds the store key of one epoch record.

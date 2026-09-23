@@ -3,9 +3,9 @@
 //! MLS says nothing about *which* signature key legitimately belongs to a given
 //! user; a basic credential is a bare assertion. Left at that, the server (the
 //! party that hands out key packages) would decide who "Bob" is, and could
-//! quietly seat itself in every group. Pinning removes that power: the first
-//! signature key seen for a user UUID is remembered, and any later one is
-//! rejected until a human resolves the discrepancy.
+//! quietly seat itself in every group. Pinning removes that power: the
+//! signature key a user is first invited or joined with is remembered, and any
+//! later one is rejected until a human resolves the discrepancy.
 //!
 //! Records are sealed like every other, not because a public key is secret but
 //! because the AEAD tag is what stops an attacker with write access to the
@@ -75,8 +75,9 @@ impl IdentityPinStore {
 
     /// Forgets the pin held for `user_uuid`.
     ///
-    /// The next signature key seen for that user is pinned afresh, so this is
-    /// only safe once the user has verified the new key out of band.
+    /// The next signature key that user is invited or joined with is pinned
+    /// afresh, so this is only safe once the user has verified the new key out
+    /// of band.
     ///
     /// # Errors
     ///
@@ -87,8 +88,25 @@ impl IdentityPinStore {
             .map_err(|error| MlsError::StorageFailed(error.to_string()))
     }
 
-    /// Checks `signature_key` against the pin for `user_uuid`, pinning it if
-    /// this is the first time the user has been seen.
+    /// Checks `signature_key` against the pin for `user_uuid`, without pinning
+    /// anything when there is none.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::IdentityKeyMismatch` - If a different key is already pinned.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+    pub fn verify(&self, user_uuid: &str, signature_key: &[u8]) -> Result<(), MlsError> {
+        match self.pinned_key(user_uuid)? {
+            Some(pinned) if pinned != signature_key => {
+                Err(MlsError::IdentityKeyMismatch(user_uuid.to_string()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks `signature_key` against the pin for `user_uuid`, pinning it when
+    /// none is pinned yet.
     ///
     /// # Errors
     ///
