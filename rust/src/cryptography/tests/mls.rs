@@ -15,6 +15,9 @@ mod tests {
 
     use crate::cryptography::mls::client::MlsClient;
     use crate::cryptography::mls::group::MlsGroup;
+    use crate::cryptography::mls::one_time_expense::{
+        OneTimeExpenseManifest, SealedValue, verify_one_time_expense,
+    };
     use crate::cryptography::mls::storage::{MlsNamespace, MlsStore, MlsStoreError};
     use crate::cryptography::mls::types::{InviteeKeyPackage, ProcessedMessage};
     use crate::cryptography::mls::{CIPHER_SUITE, MlsError};
@@ -591,6 +594,49 @@ mod tests {
             .expect_err("a Welcome for a deleted group must be refused");
 
         assert!(matches!(error, MlsError::GroupAlreadyJoined));
+    }
+
+    #[test]
+    fn test_a_client_signs_expenses_with_the_key_its_peers_pin() {
+        let alice = TestUser::new();
+
+        let manifest = OneTimeExpenseManifest {
+            revision: 0,
+            is_settlement: false,
+            title: SealedValue {
+                nonce: b"nonce".to_vec(),
+                ciphertext: b"title".to_vec(),
+            },
+            description: SealedValue {
+                nonce: b"nonce".to_vec(),
+                ciphertext: b"description".to_vec(),
+            },
+            amount: SealedValue {
+                nonce: b"nonce".to_vec(),
+                ciphertext: b"amount".to_vec(),
+            },
+            currency: SealedValue {
+                nonce: b"nonce".to_vec(),
+                ciphertext: b"currency".to_vec(),
+            },
+            timestamp: SealedValue {
+                nonce: b"nonce".to_vec(),
+                ciphertext: b"timestamp".to_vec(),
+            },
+            beneficiaries: Vec::new(),
+        };
+
+        let signature = alice
+            .client
+            .sign_one_time_expense(manifest.clone())
+            .unwrap();
+
+        assert!(verify_one_time_expense(
+            alice.uuid.clone(),
+            alice.client.signature_public_key(),
+            manifest,
+            signature,
+        ));
     }
 
     #[test]

@@ -7,10 +7,10 @@
 //! address each one individually. Once the commit is built, each invitee's
 //! signature key is pinned to them.
 
-use mls_rs::{CryptoProvider, MlsMessage};
+use mls_rs::MlsMessage;
 
 use crate::cryptography::mls::{
-    CIPHER_SUITE, MlsError, config::crypto_provider, identity::credential::user_uuid_from,
+    CIPHER_SUITE, MlsError, config::cipher_suite_provider, identity::credential::user_uuid_from,
     storage::identity_pin::IdentityPinStore, types::InviteeKeyPackage,
 };
 
@@ -123,11 +123,7 @@ pub fn match_welcomes(
     welcomes: &[MlsMessage],
     invitees: &[Invitee],
 ) -> Result<Vec<super::types::WelcomeForMember>, MlsError> {
-    let cipher_suite_provider = crypto_provider()
-        .cipher_suite_provider(CIPHER_SUITE)
-        .ok_or_else(|| {
-            MlsError::ProtocolFailed("The configured cipher suite is unavailable.".to_string())
-        })?;
+    let cipher_suite_provider = cipher_suite_provider()?;
 
     invitees
         .iter()

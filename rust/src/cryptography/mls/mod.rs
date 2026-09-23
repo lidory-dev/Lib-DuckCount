@@ -25,6 +25,7 @@ pub mod group;
 pub mod identity;
 pub mod invitation;
 pub mod key_package;
+pub mod one_time_expense;
 pub mod storage;
 pub mod types;
 

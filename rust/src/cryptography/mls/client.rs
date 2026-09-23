@@ -20,6 +20,7 @@ use crate::cryptography::mls::{
     },
     invitation::{match_welcomes, pin_invitees, validate_invitees},
     key_package::generate_key_packages::generate_key_packages,
+    one_time_expense::{self, OneTimeExpenseManifest},
     storage::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
         key_package::SealedKeyPackageStorage, sealed_record::SealingKey,
@@ -167,6 +168,22 @@ impl MlsClient {
     /// peer who is verifying them.
     pub fn fingerprint(&self) -> String {
         fingerprint(self.signature_key_pair.public.as_ref())
+    }
+
+    /// Signs one version of a one-time expense this user is the creditor of.
+    ///
+    /// See [`one_time_expense`] for what the signature covers, and
+    /// [`verify_one_time_expense`](one_time_expense::verify_one_time_expense)
+    /// for checking it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::ProtocolFailed` - If the manifest cannot be encoded or signed.
+    pub fn sign_one_time_expense(
+        &self,
+        manifest: OneTimeExpenseManifest,
+    ) -> Result<Vec<u8>, MlsError> {
+        one_time_expense::sign(&self.signature_key_pair.secret, &self.user_uuid, manifest)
     }
 
     /// Generates key packages to publish so peers can add this user to groups

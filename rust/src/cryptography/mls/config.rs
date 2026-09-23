@@ -21,7 +21,7 @@ use mls_rs_core::crypto::SignatureSecretKey;
 use mls_rs_crypto_awslc::AwsLcCryptoProvider;
 
 use crate::cryptography::mls::{
-    CIPHER_SUITE,
+    CIPHER_SUITE, MlsError,
     identity::pinning_provider::PinningIdentityProvider,
     storage::{group_state::SealedGroupStateStorage, key_package::SealedKeyPackageStorage},
 };
@@ -123,31 +123,36 @@ pub fn build_client(
         .build()
 }
 
+/// The primitives of [`CIPHER_SUITE`]: its signatures, hashes and AEAD.
+///
+/// # Errors
+///
+/// * `MlsError::ProtocolFailed` - If the cipher suite is unavailable.
+pub fn cipher_suite_provider()
+-> Result<<AwsLcCryptoProvider as CryptoProvider>::CipherSuiteProvider, MlsError> {
+    crypto_provider()
+        .cipher_suite_provider(CIPHER_SUITE)
+        .ok_or_else(|| {
+            MlsError::ProtocolFailed("The configured cipher suite is unavailable.".to_string())
+        })
+}
+
 /// Generates a fresh signature key pair for the configured cipher suite.
 ///
 /// # Returns
 ///
-/// * `Result<(SignatureSecretKey, mls_rs_core::crypto::SignaturePublicKey), crate::cryptography::mls::MlsError>` -
+/// * `Result<(SignatureSecretKey, mls_rs_core::crypto::SignaturePublicKey), MlsError>` -
 ///   The new key pair.
 ///
 /// # Errors
 ///
 /// * `MlsError::ProtocolFailed` - If the cipher suite is unavailable or key
 ///   generation fails.
-pub fn generate_signature_key_pair() -> Result<
-    (SignatureSecretKey, mls_rs_core::crypto::SignaturePublicKey),
-    crate::cryptography::mls::MlsError,
-> {
-    use crate::cryptography::mls::MlsError;
+pub fn generate_signature_key_pair()
+-> Result<(SignatureSecretKey, mls_rs_core::crypto::SignaturePublicKey), MlsError> {
     use mls_rs::CipherSuiteProvider;
 
-    let cipher_suite_provider = crypto_provider()
-        .cipher_suite_provider(CIPHER_SUITE)
-        .ok_or_else(|| {
-            MlsError::ProtocolFailed("The configured cipher suite is unavailable.".to_string())
-        })?;
-
-    cipher_suite_provider
+    cipher_suite_provider()?
         .signature_key_generate()
         .map_err(|error| MlsError::ProtocolFailed(error.to_string()))
 }
