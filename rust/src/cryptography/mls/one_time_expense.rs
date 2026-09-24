@@ -5,14 +5,13 @@
 //! values, and what the server keeps in the clear (who paid, whether it is a
 //! settlement, who owes) is not sealed at all. The creditor therefore signs each
 //! version with their MLS identity key, over everything the server stores for
-//! it, and a participant believes a version only when that signature checks out
+//! it, and a participant accepts a version only when that signature checks out
 //! under the key they hold for the creditor.
 //!
 //! What is signed is the sealed bytes rather than what they open to, so a
 //! version is checked before anything in it is decrypted. The expense's UUID is
-//! not part of it: the server assigns it after the creditor has signed, and the
-//! fields are sealed under a key that belongs to that one expense and reached
-//! each participant tied to its UUID.
+//! not part of it: the fields are sealed under a key that belongs to that one
+//! expense and reached each participant tied to its UUID.
 //!
 //! # Domain separation
 //!
