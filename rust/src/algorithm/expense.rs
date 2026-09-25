@@ -1,4 +1,7 @@
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 
 use bigdecimal::num_bigint::BigInt;
 use bigdecimal::num_bigint::ToBigInt;
@@ -46,7 +49,18 @@ pub enum ExpenseError {
         "The amount or the share of a beneficiary uses subunits, but the currency does not support fractional amounts."
     )]
     UnsupportedSubunits,
+    /// The same user is listed as a beneficiary more than once.
+    #[error("The same user is listed as a beneficiary more than once.")]
+    DuplicateBeneficiary,
 }
+
+/// The most digits an amount or a share may have before its decimal point: a thousand
+/// trillion, far past any real expense, and few enough to keep adding them up cheap.
+const MAX_WHOLE_DIGITS: usize = 15;
+
+/// The most digits an amount or a share may have after its decimal point, in a currency
+/// with a subunit: its cents.
+const MAX_SUBUNIT_DIGITS: usize = 2;
 
 /// Represents an expense made by a creditor, distributed among multiple beneficiaries.
 ///
@@ -401,6 +415,9 @@ pub fn compute_beneficiaries(
 /// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
 /// - Any share amount is not positive.
 /// - The expense amount or any share uses subunits, but the currency does not support fractional amounts.
+/// - The expense amount or any share is not 1 to 15 ASCII digits, followed, only in a currency with a
+///   subunit, by an optional point and 1 or 2 digits.
+/// - The same user is listed as a beneficiary more than once.
 ///
 /// # Examples
 ///
@@ -435,32 +452,28 @@ pub fn validate_expense(
     currency: &Currency,
     beneficiaries: &Vec<Beneficiary>,
 ) -> Result<(), ExpenseError> {
-    let amount = BigDecimal::from_str(&amount).map_err(|_| ExpenseError::MalformedAmount)?;
+    let amount = parse_amount(amount, currency)?;
 
     if amount <= BigDecimal::zero() {
         return Err(ExpenseError::NonPositiveAmount);
-    }
-
-    if !currency.has_sub_unit && amount.fractional_digit_count() > 0 {
-        return Err(ExpenseError::UnsupportedSubunits);
     }
 
     if beneficiaries.is_empty() {
         return Err(ExpenseError::NoBeneficiaries);
     }
 
+    let mut user_uuids = HashSet::with_capacity(beneficiaries.len());
     let mut total_share_amount = BigDecimal::zero();
 
     for beneficiary in beneficiaries {
-        let share =
-            BigDecimal::from_str(&beneficiary.share).map_err(|_| ExpenseError::MalformedAmount)?;
+        if !user_uuids.insert(&beneficiary.user_uuid) {
+            return Err(ExpenseError::DuplicateBeneficiary);
+        }
+
+        let share = parse_amount(&beneficiary.share, currency)?;
 
         if share <= BigDecimal::zero() {
             return Err(ExpenseError::NonPositiveShare);
-        }
-
-        if !currency.has_sub_unit && share.fractional_digit_count() > 0 {
-            return Err(ExpenseError::UnsupportedSubunits);
         }
 
         total_share_amount += share;
@@ -475,4 +488,45 @@ pub fn validate_expense(
     }
 
     Ok(())
+}
+
+/// Parses `amount` in the only form the app writes one: one to [MAX_WHOLE_DIGITS] ASCII
+/// digits, then, in a currency with a subunit, optionally a point and one to
+/// [MAX_SUBUNIT_DIGITS] more digits.
+///
+/// [BigDecimal] alone also reads a sign, an exponent and underscores, which other parsers
+/// do not all read the same way, if at all. An exponent also lets two amounts differ in
+/// scale by billions, which adding them up then pays for in time and memory.
+///
+/// # Errors
+///
+/// * `ExpenseError::UnsupportedSubunits` - If `amount` is digits then a point, and
+///   `currency` has no subunit.
+/// * `ExpenseError::MalformedAmount` - If `amount` is written any other way.
+fn parse_amount(amount: &str, currency: &Currency) -> Result<BigDecimal, ExpenseError> {
+    let (whole, subunits) = match amount.split_once('.') {
+        Some((whole, subunits)) => (whole, Some(subunits)),
+        None => (amount, None),
+    };
+
+    if !is_digits(whole, MAX_WHOLE_DIGITS) {
+        return Err(ExpenseError::MalformedAmount);
+    }
+
+    if let Some(subunits) = subunits {
+        if !currency.has_sub_unit {
+            return Err(ExpenseError::UnsupportedSubunits);
+        }
+
+        if !is_digits(subunits, MAX_SUBUNIT_DIGITS) {
+            return Err(ExpenseError::MalformedAmount);
+        }
+    }
+
+    BigDecimal::from_str(amount).map_err(|_| ExpenseError::MalformedAmount)
+}
+
+/// Whether `part` is one to `max_length` ASCII digits.
+fn is_digits(part: &str, max_length: usize) -> bool {
+    (1..=max_length).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit())
 }
