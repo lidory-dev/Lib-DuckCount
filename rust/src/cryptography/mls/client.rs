@@ -35,6 +35,15 @@ use crate::cryptography::mls::{
 /// impossible in practice without any coordination.
 const GROUP_ID_LENGTH: usize = 32;
 
+/// The highest epoch a Welcome may put a joined group at.
+///
+/// A group moves one epoch per commit, so no real group comes near it, and it
+/// sits far enough below `u64::MAX` that no run of commits can overflow the
+/// `epoch += 1` mls-rs makes on each one, which panics in a debug build. A
+/// Welcome is the only way an epoch this device did not count up to itself
+/// reaches its state, and it is its author's to write.
+const MAX_JOINED_EPOCH: u64 = u32::MAX as u64;
+
 /// One user's MLS client.
 ///
 /// # Relationship to the DuckCount API
@@ -323,7 +332,8 @@ impl MlsClient {
     ///
     /// # Errors
     ///
-    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed.
+    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, or puts
+    ///   the group at an epoch past 2^32 - 1, which no real group reaches.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
@@ -346,6 +356,10 @@ impl MlsClient {
         // Joined in memory only: mls-rs stores nothing, and spends no key
         // package, until `write_to_storage`.
         let (mut group, _) = client.join_group(None, &welcome, None)?;
+
+        if group.current_epoch() > MAX_JOINED_EPOCH {
+            return Err(MlsError::InvalidMessage);
+        }
 
         if self.group_states.has_held(group.group_id())? {
             return Err(MlsError::GroupAlreadyJoined);
