@@ -7,7 +7,7 @@ use zeroize::Zeroizing;
 use crate::cryptography::encryption::keys::NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE;
 
 pub(crate) mod login;
-mod reauth;
+pub(crate) mod reauth;
 pub(crate) mod registration;
 
 pub(crate) struct DefaultCipherSuite;

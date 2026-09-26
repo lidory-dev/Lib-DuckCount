@@ -10,6 +10,7 @@ mod tests {
         authentication::{
             AuthenticationError, DefaultCipherSuite,
             login::Login,
+            reauth::ReAuth,
             registration::{Registration, RegistrationFinishResult},
         },
         encryption::encrypted_field::EncryptedField,
@@ -184,5 +185,20 @@ mod tests {
             Login::new().unseal_root_key(&sealed_root_key),
             Err(AuthenticationError::RootKeyDecryptionFailed)
         ));
+    }
+
+    /// The credential response is the server's to write, so one that is not
+    /// one is refused rather than trusted to parse.
+    #[test]
+    fn test_a_reauth_refuses_a_malformed_credential_response() {
+        for response in [vec![], vec![0; 319], vec![0; 320], b"{}".to_vec()] {
+            let reauth = ReAuth::new();
+            reauth.start(PASSWORD).unwrap();
+
+            assert!(matches!(
+                reauth.finish(&response, PASSWORD),
+                Err(AuthenticationError::CredentialResponseDeserializationFailed)
+            ));
+        }
     }
 }

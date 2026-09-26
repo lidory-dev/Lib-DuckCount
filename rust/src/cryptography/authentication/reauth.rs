@@ -13,7 +13,7 @@ use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuit
 /// is guarded by a [`Mutex`] so the object can be shared safely across threads
 /// via the UniFFI bindings.
 #[derive(uniffi::Object)]
-struct ReAuth {
+pub(crate) struct ReAuth {
     /// Serialized `ClientLogin` state produced by `start` and consumed by
     /// `finish`. Empty until `start` has been called successfully.
     state: Mutex<Zeroizing<Vec<u8>>>,
@@ -46,7 +46,7 @@ impl ReAuth {
     ///
     /// A `Result` containing containing a vector of bytes representing the serialized message if successful,
     /// or an [AuthenticationError] otherwise.
-    fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
+    pub(crate) fn start(&self, password: &str) -> Result<Vec<u8>, AuthenticationError> {
         let mut state = self
             .state
             .lock()
@@ -75,7 +75,7 @@ impl ReAuth {
     ///
     /// A `Result` containing a vector of bytes representing the serialized final message if successful,
     /// or an [AuthenticationError] otherwise.
-    fn finish(
+    pub(crate) fn finish(
         &self,
         credential_response_bytes: &Vec<u8>,
         password: &str,
@@ -97,7 +97,8 @@ impl ReAuth {
         let client_login_finish = client_login
             .finish(
                 password.as_bytes(),
-                CredentialResponse::deserialize(credential_response_bytes).unwrap(),
+                CredentialResponse::deserialize(credential_response_bytes)
+                    .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
                 ClientLoginFinishParameters::default(),
             )
             .map_err(|error| {

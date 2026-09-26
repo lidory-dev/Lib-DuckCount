@@ -125,10 +125,11 @@ pub fn decrypt_using_symmetric_key(
     let key = Key::<Aes256Gcm>::from_slice(&key);
     let cipher = Aes256Gcm::new(&key);
 
-    let nonce = Nonce::from_slice(nonce);
+    let nonce =
+        Nonce::from_exact_iter(nonce.iter().copied()).ok_or(EncryptionError::DecryptionFailed)?;
 
     let plain_text = cipher
-        .decrypt(nonce, ciphertext.as_ref())
+        .decrypt(&nonce, ciphertext.as_ref())
         .map_err(|_| EncryptionError::DecryptionFailed)?;
 
     Ok(plain_text)

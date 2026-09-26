@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::cryptography::encryption::{
+        EncryptionError,
         decrypt::{decrypt_deterministically_using_symmetric_key, decrypt_using_symmetric_key},
         encrypt::{encrypt_deterministically_using_symmetric_key, encrypt_using_symmetric_key},
         keys::{
@@ -91,5 +92,21 @@ mod tests {
         // Wrong nonce should fail.
         let wrong_nonce = Aes256Gcm::generate_nonce(&mut OsRng).to_vec();
         assert!(decrypt_using_symmetric_key(&key, &encrypted.ciphertext, &wrong_nonce).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_non_deterministic_refuses_a_nonce_of_the_wrong_length() {
+        let key = generate_symmetric_encryption_key();
+        let encrypted = encrypt_using_symmetric_key(&key, &b"hello world".to_vec()).unwrap();
+
+        for length in [0, 3, 11, 13, 64] {
+            assert!(
+                matches!(
+                    decrypt_using_symmetric_key(&key, &encrypted.ciphertext, &vec![0; length]),
+                    Err(EncryptionError::DecryptionFailed)
+                ),
+                "{length}"
+            );
+        }
     }
 }
