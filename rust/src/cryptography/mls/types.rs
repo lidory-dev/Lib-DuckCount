@@ -81,6 +81,14 @@ pub enum ProcessedMessage {
         sender_user_uuid: String,
         /// The plaintext payload.
         payload: Vec<u8>,
+        /// Whether it was signed with the key pinned for its sender.
+        ///
+        /// False for a sender nobody pinned yet, such as the sender of a
+        /// contact request not accepted yet or a member somebody else
+        /// committed in, and for a leaf whose key was never checked against
+        /// the pin: mls-rs checks a leaf when it enters the group, not against
+        /// a pin taken later.
+        is_sender_pinned: bool,
     },
     /// A Commit was applied and the group advanced to a new epoch.
     Commit {

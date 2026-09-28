@@ -36,6 +36,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use mls_rs::group::{CommitEffect, ReceivedMessage};
 use mls_rs::{Group, MlsMessage};
+use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
     MlsError,
@@ -101,6 +102,33 @@ impl MlsGroup {
                 })
             })
             .collect()
+    }
+
+    /// Pins to each of `expected_members` the signature key they hold in this
+    /// group, provided it still holds exactly this user and them.
+    ///
+    /// This is the host saying it trusts them, for a group it joined without
+    /// pinning anybody, see [`MlsClient::join_group`]: for a contact request,
+    /// when the user accepts it. The roster is checked again because it can
+    /// have changed since the join, and a member who committed others in must
+    /// not get to decide who they are.
+    ///
+    /// [`MlsClient::join_group`]: crate::cryptography::mls::client::MlsClient::join_group
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::UnexpectedMembers` - If the members are no longer exactly
+    ///   this user and `expected_members`.
+    /// * `MlsError::IdentityKeyMismatch` - If a different key is pinned for one
+    ///   of them by now.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+    pub fn pin_members(&self, expected_members: Vec<String>) -> Result<(), MlsError> {
+        let group = self.locked()?;
+
+        pin_peers(&self.pins, &expected_peers(&group, expected_members)?)
     }
 
     /// Whether a Commit is waiting to be applied or discarded.
@@ -344,16 +372,23 @@ impl MlsGroup {
 
         let processed = match received {
             ReceivedMessage::ApplicationMessage(description) => {
-                let sender_user_uuid = Self::member_uuid(&group, description.sender_index)
+                let sender = group
+                    .member_at_index(description.sender_index)
                     .ok_or_else(|| {
                         MlsError::ProtocolFailed(
                             "An application message came from an unknown member.".to_string(),
                         )
                     })?;
 
+                let sender_user_uuid = user_uuid_from(&sender.signing_identity.credential)?;
+
+                let is_sender_pinned = self.pins.pinned_key(&sender_user_uuid)?.as_deref()
+                    == Some(sender.signing_identity.signature_key.as_ref());
+
                 ProcessedMessage::ApplicationMessage {
                     sender_user_uuid,
                     payload: description.data().to_vec(),
+                    is_sender_pinned,
                 }
             }
             ReceivedMessage::Commit(description) => ProcessedMessage::Commit {
@@ -422,7 +457,8 @@ impl std::fmt::Debug for MlsGroup {
 }
 
 impl MlsGroup {
-    /// Wraps a loaded mls-rs group, pinning the members it adds in `pins`.
+    /// Wraps a loaded mls-rs group. `pins` is where [`add_members`](Self::add_members)
+    /// and [`pin_members`](Self::pin_members) record the keys they pin.
     pub(crate) fn new(group: Group<DuckCountMlsConfig>, pins: IdentityPinStore) -> Self {
         MlsGroup {
             group: Mutex::new(group),
@@ -442,4 +478,59 @@ impl MlsGroup {
             .member_at_index(index)
             .and_then(|member| user_uuid_from(&member.signing_identity.credential).ok())
     }
+}
+
+/// The members of `group` other than this user, with their signature keys,
+/// provided they are exactly `expected_members`.
+///
+/// Comparing sorted lists is exact because mls-rs refuses a tree in which two
+/// leaves share an identity, so each UUID appears on the roster once.
+///
+/// # Errors
+///
+/// * `MlsError::UnexpectedMembers` - If the members differ from the expected ones.
+/// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+pub(crate) fn expected_peers(
+    group: &Group<DuckCountMlsConfig>,
+    mut expected_members: Vec<String>,
+) -> Result<Vec<(String, SignaturePublicKey)>, MlsError> {
+    let mut peers = Vec::new();
+
+    for member in group.roster().members() {
+        if member.index != group.current_member_index() {
+            let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+
+            peers.push((user_uuid, member.signing_identity.signature_key));
+        }
+    }
+
+    let mut peer_uuids = peers
+        .iter()
+        .map(|(user_uuid, _)| user_uuid.clone())
+        .collect::<Vec<_>>();
+
+    peer_uuids.sort_unstable();
+    expected_members.sort_unstable();
+
+    if peer_uuids != expected_members {
+        return Err(MlsError::UnexpectedMembers);
+    }
+
+    Ok(peers)
+}
+
+/// Pins each of `peers` to the signature key paired with them.
+///
+/// # Errors
+///
+/// * `MlsError::IdentityKeyMismatch` - If a different key is pinned for one of them.
+/// * `MlsError::StorageFailed` - If the host storage fails.
+/// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+pub(crate) fn pin_peers(
+    pins: &IdentityPinStore,
+    peers: &[(String, SignaturePublicKey)],
+) -> Result<(), MlsError> {
+    peers.iter().try_for_each(|(user_uuid, signature_key)| {
+        pins.verify_or_pin(user_uuid, signature_key.as_ref())
+    })
 }

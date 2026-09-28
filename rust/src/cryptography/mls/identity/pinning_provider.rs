@@ -11,7 +11,7 @@
 //! rest of DuckCount deliberately avoids.
 //!
 //! Pinning closes the gap without a PKI. The signature key a user is first
-//! invited or joined with is remembered; every later appearance must match it.
+//! invited or trusted with is remembered; every later appearance must match it.
 //! A server that swaps in its own key is rejected the moment it tries, and a
 //! user who legitimately rotates their key has to be re-verified out of band
 //! (see [`super::fingerprint`]).
@@ -24,9 +24,11 @@
 //! else in it is. Pinning from here would let whoever wrote a Welcome decide
 //! the keys of people this user has never met.
 //!
-//! Pins are written instead once an operation has succeeded, and only for the
-//! users the host named: the invitees it fetched key packages for, and the
-//! members it expected when joining.
+//! Pins are written instead once mls-rs has validated everything, and only
+//! for the users the host chose: the invitees it fetched key packages for,
+//! and the members of a group it joined once it trusts them, at the join or
+//! later with
+//! [`MlsGroup::pin_members`](crate::cryptography::mls::group::MlsGroup::pin_members).
 
 use mls_rs::ExtensionList;
 use mls_rs::identity::{CredentialType, SigningIdentity};

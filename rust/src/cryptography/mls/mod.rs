@@ -77,8 +77,8 @@ pub enum MlsError {
     /// still holds it or deleted it since. Joining it again would put that
     /// group back at the epoch the Welcome was for.
     GroupAlreadyJoined,
-    /// A Welcome is for a group whose members are not exactly this user and
-    /// the ones the host expected.
+    /// A group, one a Welcome is for or one already joined, holds members
+    /// other than exactly this user and the ones the host expected.
     UnexpectedMembers,
     /// No member of the group holds the given user UUID.
     MemberNotFound(String),

@@ -166,7 +166,7 @@ mod tests {
 
             let group_id = user
                 .client
-                .join_group(welcome.welcome.clone(), uuids(&others))
+                .join_group(welcome.welcome.clone(), uuids(&others), true)
                 .unwrap();
 
             groups.push(user.client.load_group(group_id).unwrap());
@@ -223,9 +223,11 @@ mod tests {
                 ProcessedMessage::ApplicationMessage {
                     sender_user_uuid,
                     payload,
+                    is_sender_pinned,
                 } => {
                     assert_eq!(sender_user_uuid, alice.uuid);
                     assert_eq!(payload, expense_key);
+                    assert!(is_sender_pinned);
                 }
                 other => panic!(
                     "expected an application message, got {:?}",
@@ -273,7 +275,11 @@ mod tests {
 
         let carol_group_id = carol
             .client
-            .join_group(output.welcomes[0].welcome.clone(), uuids(&[&alice, &bob]))
+            .join_group(
+                output.welcomes[0].welcome.clone(),
+                uuids(&[&alice, &bob]),
+                true,
+            )
             .unwrap();
         let carol_group = carol.client.load_group(carol_group_id).unwrap();
 
@@ -375,36 +381,203 @@ mod tests {
             if someone_else.user_uuid != user.uuid {
                 assert!(
                     user.client
-                        .join_group(someone_else.welcome.clone(), uuids(&others))
+                        .join_group(someone_else.welcome.clone(), uuids(&others), true)
                         .is_err()
                 );
             }
 
             assert!(
                 user.client
-                    .join_group(welcome.welcome.clone(), uuids(&others))
+                    .join_group(welcome.welcome.clone(), uuids(&others), true)
                     .is_ok()
             );
         }
     }
 
+    /// Joins `inviter`'s new group with `joiner` as a contact request is
+    /// opened: expecting the inviter, and pinning nobody.
+    fn open_request(inviter: &TestUser, joiner: &TestUser) -> (Arc<MlsGroup>, Arc<MlsGroup>) {
+        let creation = inviter
+            .client
+            .create_group(vec![joiner.invitation()])
+            .unwrap();
+
+        let group_id = joiner
+            .client
+            .join_group(
+                creation.welcomes[0].welcome.clone(),
+                uuids(&[inviter]),
+                false,
+            )
+            .unwrap();
+
+        (
+            inviter.client.load_group(creation.mls_group_id).unwrap(),
+            joiner.client.load_group(group_id).unwrap(),
+        )
+    }
+
     #[test]
-    fn test_joining_pins_the_expected_members() {
+    fn test_a_joined_group_pins_its_members_only_when_asked() {
         let alice = TestUser::new();
         let bob = TestUser::new();
-        let carol = TestUser::new();
 
-        establish_group(&alice, &[&bob, &carol]);
+        let (_, bob_group) = open_request(&alice, &bob);
 
-        for (member, key) in [
-            (&alice, alice.client.signature_public_key()),
-            (&carol, carol.client.signature_public_key()),
-        ] {
-            assert_eq!(
-                bob.client
+        assert!(
+            bob.client
+                .pinned_signature_key(alice.uuid.clone())
+                .unwrap()
+                .is_none(),
+            "a request opened and then refused must leave no pin behind"
+        );
+
+        bob_group.pin_members(uuids(&[&alice])).unwrap();
+
+        assert_eq!(
+            bob.client.pinned_signature_key(alice.uuid.clone()).unwrap(),
+            Some(alice.client.signature_public_key())
+        );
+    }
+
+    #[test]
+    fn test_pinning_members_refuses_a_key_pinned_differently_since_the_join() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let impostor = TestUser::new();
+
+        let (_, bob_group) = open_request(&alice, &bob);
+
+        bob.client
+            .pin_identity(alice.uuid.clone(), impostor.client.signature_public_key())
+            .unwrap();
+
+        assert!(matches!(
+            bob_group.pin_members(uuids(&[&alice])).unwrap_err(),
+            MlsError::IdentityKeyMismatch(uuid) if uuid == alice.uuid
+        ));
+    }
+
+    /// Whether `receiver` reads a message from `sender` as signed with the key
+    /// pinned for them.
+    fn reads_as_pinned(sender: &MlsGroup, receiver: &MlsGroup) -> bool {
+        let message = sender
+            .encrypt_application_message(b"hello".to_vec())
+            .unwrap();
+
+        match receiver.process_incoming_message(message).unwrap() {
+            ProcessedMessage::ApplicationMessage {
+                is_sender_pinned, ..
+            } => is_sender_pinned,
+            other => panic!(
+                "expected an application message, got {:?}",
+                other_kind(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn test_a_request_is_read_as_unpinned_until_its_sender_is_pinned() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (alice_group, bob_group) = open_request(&alice, &bob);
+
+        assert!(!reads_as_pinned(&alice_group, &bob_group));
+
+        bob_group.pin_members(uuids(&[&alice])).unwrap();
+
+        assert!(reads_as_pinned(&alice_group, &bob_group));
+
+        // The answer, read by the requester, who pinned Bob when inviting him.
+        assert!(reads_as_pinned(&bob_group, &alice_group));
+    }
+
+    #[test]
+    fn test_a_member_committed_in_before_their_pin_is_read_as_unpinned() {
+        // Mallory commits in a leaf claiming to be Quentin before Victor has
+        // met him. Once Victor pins the real Quentin, that leaf is still not
+        // him.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+        let quentin = TestUser::new();
+
+        let groups = establish_group(&mallory, &[&victor]);
+        let (mallory_group, victor_group) = (&groups[0], &groups[1]);
+
+        let store = TestStore::new();
+        let posing_as_quentin = TestUser {
+            uuid: quentin.uuid.clone(),
+            client: MlsClient::new(quentin.uuid.clone(), SECRET.to_vec(), store.clone()).unwrap(),
+            store,
+        };
+
+        let output = mallory_group
+            .add_members(vec![posing_as_quentin.invitation()])
+            .unwrap();
+
+        victor_group
+            .process_incoming_message(output.commit)
+            .unwrap();
+        accept(mallory_group);
+
+        let fake_group_id = posing_as_quentin
+            .client
+            .join_group(
+                output.welcomes[0].welcome.clone(),
+                uuids(&[&mallory, &victor]),
+                false,
+            )
+            .unwrap();
+        let fake_group = posing_as_quentin.client.load_group(fake_group_id).unwrap();
+
+        victor
+            .client
+            .pin_identity(quentin.uuid.clone(), quentin.client.signature_public_key())
+            .unwrap();
+
+        assert!(!reads_as_pinned(&fake_group, victor_group));
+        assert!(reads_as_pinned(mallory_group, victor_group));
+    }
+
+    #[test]
+    fn test_members_committed_in_after_the_join_are_never_pinned() {
+        // Mallory's request is opened, then she commits in a leaf claiming to
+        // be Quentin, with a key she made up, before Victor accepts.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+        let quentin = TestUser::new();
+
+        let (mallory_group, victor_group) = open_request(&mallory, &victor);
+
+        let store = TestStore::new();
+        let posing_as_quentin = TestUser {
+            uuid: quentin.uuid.clone(),
+            client: MlsClient::new(quentin.uuid.clone(), SECRET.to_vec(), store.clone()).unwrap(),
+            store,
+        };
+
+        let output = mallory_group
+            .add_members(vec![posing_as_quentin.invitation()])
+            .unwrap();
+
+        victor_group
+            .process_incoming_message(output.commit)
+            .unwrap();
+
+        assert!(matches!(
+            victor_group.pin_members(uuids(&[&mallory])).unwrap_err(),
+            MlsError::UnexpectedMembers
+        ));
+
+        for member in [&mallory, &quentin] {
+            assert!(
+                victor
+                    .client
                     .pinned_signature_key(member.uuid.clone())
-                    .unwrap(),
-                Some(key)
+                    .unwrap()
+                    .is_none(),
+                "nobody is pinned from a roster the host did not expect"
             );
         }
     }
@@ -429,7 +602,7 @@ mod tests {
         // Bob was told this is a group with Alice alone.
         let error = bob
             .client
-            .join_group(welcome.welcome.clone(), uuids(&[&alice]))
+            .join_group(welcome.welcome.clone(), uuids(&[&alice]), true)
             .expect_err("a group holding somebody unexpected must be refused");
 
         assert!(matches!(error, MlsError::UnexpectedMembers));
@@ -455,7 +628,7 @@ mod tests {
         // expectation is right.
         assert!(
             bob.client
-                .join_group(welcome.welcome.clone(), uuids(&[&alice, &carol]))
+                .join_group(welcome.welcome.clone(), uuids(&[&alice, &carol]), true)
                 .is_ok()
         );
     }
@@ -478,7 +651,11 @@ mod tests {
 
         let error = victor
             .client
-            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&mallory]))
+            .join_group(
+                creation.welcomes[0].welcome.clone(),
+                uuids(&[&mallory]),
+                true,
+            )
             .expect_err("a leaf claiming somebody other than the sender must be refused");
 
         assert!(matches!(error, MlsError::UnexpectedMembers));
@@ -521,7 +698,7 @@ mod tests {
 
         let error = alice
             .client
-            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&bob]))
+            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&bob]), false)
             .expect_err("a Welcome signed with a key other than Bob's pinned one must be refused");
 
         assert!(matches!(error, MlsError::IdentityKeyMismatch(uuid) if uuid == bob.uuid));
@@ -549,7 +726,7 @@ mod tests {
 
         let group_id = bob
             .client
-            .join_group(welcome.clone(), uuids(&[&alice]))
+            .join_group(welcome.clone(), uuids(&[&alice]), true)
             .unwrap();
 
         let alice_group = alice.client.load_group(group_id.clone()).unwrap();
@@ -566,7 +743,7 @@ mod tests {
 
         let error = bob
             .client
-            .join_group(welcome.clone(), uuids(&[&alice]))
+            .join_group(welcome.clone(), uuids(&[&alice]), true)
             .expect_err("a Welcome for a group already held must be refused");
 
         assert!(matches!(error, MlsError::GroupAlreadyJoined));
@@ -590,7 +767,7 @@ mod tests {
 
         let error = bob
             .client
-            .join_group(welcome, uuids(&[&alice]))
+            .join_group(welcome, uuids(&[&alice]), true)
             .expect_err("a Welcome for a deleted group must be refused");
 
         assert!(matches!(error, MlsError::GroupAlreadyJoined));
@@ -1002,7 +1179,11 @@ mod tests {
         assert!(
             carol
                 .client
-                .join_group(output.welcomes[0].welcome.clone(), uuids(&[&alice, &bob]))
+                .join_group(
+                    output.welcomes[0].welcome.clone(),
+                    uuids(&[&alice, &bob]),
+                    true
+                )
                 .is_ok()
         );
     }

@@ -4,8 +4,8 @@
 //! user; a basic credential is a bare assertion. Left at that, the server (the
 //! party that hands out key packages) would decide who "Bob" is, and could
 //! quietly seat itself in every group. Pinning removes that power: the
-//! signature key a user is first invited or joined with is remembered, and any
-//! later one is rejected until a human resolves the discrepancy.
+//! signature key a user is first invited or trusted with is remembered, and
+//! any later one is rejected until a human resolves the discrepancy.
 //!
 //! Records are sealed like every other, not because a public key is secret but
 //! because the AEAD tag is what stops an attacker with write access to the
@@ -75,7 +75,7 @@ impl IdentityPinStore {
 
     /// Forgets the pin held for `user_uuid`.
     ///
-    /// The next signature key that user is invited or joined with is pinned
+    /// The next signature key that user is invited or trusted with is pinned
     /// afresh, so this is only safe once the user has verified the new key out
     /// of band.
     ///
