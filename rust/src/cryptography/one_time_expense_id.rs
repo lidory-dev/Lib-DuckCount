@@ -42,6 +42,40 @@ pub fn new_one_time_expense_id(creditor_uuid: String) -> Option<OneTimeExpenseId
     })
 }
 
+/// Whether `nonce` derives `expense_uuid` from `creditor_uuid`: whether the
+/// one-time expense with that UUID, if there is one, is theirs.
+///
+/// Nobody but the creditor can show it of themselves: the UUID was derived from
+/// their own UUID and the nonce they drew, and a nonce that derives the same
+/// UUID from anybody else's has to match the 122 bits of SHA3-256 the UUID
+/// keeps, some 2^122 tries. The nonce is no secret, since it travels with every
+/// copy of the expense's key, so this says who handed a key over only when
+/// `creditor_uuid` is whoever the channel it arrived over authenticated. Then a
+/// participant can tell, as the key arrives, whether it came from the creditor,
+/// without taking the server's word for who that is.
+///
+/// # Returns
+///
+/// * `bool` - Whether `nonce` derives `expense_uuid` from `creditor_uuid`. False
+///   as well when `creditor_uuid` is not a UUID, `nonce` is not 16 bytes, or
+///   `expense_uuid` is not written the way this crate writes one.
+#[uniffi::export]
+pub fn is_one_time_expense_creditor(
+    expense_uuid: String,
+    creditor_uuid: String,
+    nonce: Vec<u8>,
+) -> bool {
+    let Ok(creditor_uuid) = Uuid::parse_str(&creditor_uuid) else {
+        return false;
+    };
+
+    let Ok(nonce) = <[u8; NONCE_LENGTH]>::try_from(nonce.as_slice()) else {
+        return false;
+    };
+
+    derive(&creditor_uuid, &nonce).to_string() == expense_uuid
+}
+
 /// The UUID of the one-time expense `creditor_uuid` creates with `nonce`.
 pub(crate) fn derive(creditor_uuid: &Uuid, nonce: &[u8; NONCE_LENGTH]) -> Uuid {
     let digest = Sha3_256::new()
