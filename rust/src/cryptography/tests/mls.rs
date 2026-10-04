@@ -712,6 +712,59 @@ mod tests {
     }
 
     #[test]
+    fn test_a_message_sent_in_the_clear_is_refused() {
+        // A proposal to add somebody, sent from outside the group: the one message mls-rs
+        // takes from a non-member, signed by nothing but the key package it carries, and
+        // needing only the group id and epoch, which travel in the clear. Taken in, it
+        // would sit pending and leave the group unable to send anything until committed.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+
+        let crypto_provider = crate::cryptography::mls::config::crypto_provider();
+        let cipher_suite_provider = crypto_provider.cipher_suite_provider(CIPHER_SUITE).unwrap();
+        let (secret, public) = cipher_suite_provider.signature_key_generate().unwrap();
+
+        let outsider = Client::builder()
+            .identity_provider(BasicIdentityProvider)
+            .crypto_provider(crypto_provider)
+            .signing_identity(
+                SigningIdentity::new(
+                    BasicCredential::new(Uuid::new_v4().to_string().into_bytes()).into_credential(),
+                    public,
+                ),
+                secret,
+                CIPHER_SUITE,
+            )
+            .build();
+
+        let proposal = outsider
+            .external_add_proposal(
+                &groups[0].group_info(),
+                None,
+                Vec::new(),
+                ExtensionList::default(),
+                ExtensionList::default(),
+                None,
+            )
+            .unwrap();
+
+        let error = groups[1]
+            .process_incoming_message(proposal.to_bytes().unwrap())
+            .expect_err("a message sent in the clear must be refused");
+
+        assert!(matches!(error, MlsError::InvalidMessage));
+
+        // Nothing was taken in, so the group still sends.
+        let message = groups[1]
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+
+        groups[0].process_incoming_message(message).unwrap();
+    }
+
+    #[test]
     fn test_a_welcome_is_never_joined_twice() {
         // A last-resort key package survives the joins it serves, so a Welcome
         // sealed to one can be delivered again, by a retry or by a server

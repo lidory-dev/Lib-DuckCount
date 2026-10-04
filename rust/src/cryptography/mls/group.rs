@@ -35,7 +35,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use mls_rs::group::{CommitEffect, ReceivedMessage};
-use mls_rs::{Group, MlsMessage};
+use mls_rs::{Group, MlsMessage, WireFormat};
 use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
@@ -356,7 +356,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
-    /// * `MlsError::InvalidMessage` - If the message cannot be parsed.
+    /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or was not
+    ///   encrypted to the group.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
@@ -365,6 +366,16 @@ impl MlsGroup {
     /// * `MlsError::StorageFailed` - If the resulting state cannot be stored.
     pub fn process_incoming_message(&self, message: Vec<u8>) -> Result<ProcessedMessage, MlsError> {
         let message = MlsMessage::from_bytes(&message).map_err(|_| MlsError::InvalidMessage)?;
+
+        // Members encrypt their commits and proposals as well as their application
+        // messages (see `mls_rules` in config.rs), so one never sends a PublicMessage.
+        // What arrives as one comes from outside the group: mls-rs takes in an Add
+        // proposal from a would-be member, signed by nothing but the key package it
+        // carries and needing only the group id and epoch, which travel in the clear.
+        // Kept pending, it would stop the group sending anything until committed.
+        if message.wire_format() != WireFormat::PrivateMessage {
+            return Err(MlsError::InvalidMessage);
+        }
 
         let mut group = self.locked()?;
 
@@ -469,6 +480,12 @@ impl MlsGroup {
     /// Takes the group lock.
     fn locked(&self) -> Result<MutexGuard<'_, Group<DuckCountMlsConfig>>, MlsError> {
         self.group.lock().map_err(|_| MlsError::LockPoisoned)
+    }
+
+    /// The group's GroupInfo, tree included, for a test to play somebody outside it with.
+    #[cfg(test)]
+    pub(crate) fn group_info(&self) -> MlsMessage {
+        self.locked().unwrap().group_info_message(true).unwrap()
     }
 
     /// Resolves a leaf index to the user UUID at that position, if anyone is
