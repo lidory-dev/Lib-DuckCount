@@ -3,16 +3,16 @@
 //! # Record format
 //!
 //! ```text
-//! sealed         := nonce (12 bytes) || AES-256-GCM(sealing_key, nonce, bound_payload)
-//! bound_payload  := namespace_tag (1 byte) || key_length (4 bytes, big endian) || key || payload
+//! sealed  := nonce (12 bytes) || AES-256-GCM(sealing_key, nonce, payload, aad = slot)
+//! slot    := namespace_tag (1 byte) || key
 //! ```
 //!
-//! The namespace and key are folded into the *authenticated* plaintext rather
-//! than left implicit. A record lifted out of one slot and dropped into another
-//! (a different group, a different epoch, another user's identity pin) then
-//! fails to open instead of being silently accepted, which is what stops a host
-//! with write access to its own database from confusing one group's state for
-//! another's.
+//! The namespace and key are authenticated as associated data rather than left
+//! implicit, and never stored. A record lifted out of one slot and dropped into
+//! another (a different group, a different epoch, another user's identity pin)
+//! then fails to open instead of being silently accepted, which is what stops a
+//! host with write access to its own database from confusing one group's state
+//! for another's.
 
 use argon2::password_hash::SaltString;
 use rand::rngs::OsRng;
@@ -21,8 +21,8 @@ use zeroize::Zeroizing;
 
 use crate::cryptography::{
     encryption::{
-        decrypt::decrypt_using_symmetric_key,
-        encrypt::encrypt_using_symmetric_key,
+        decrypt::decrypt_using_symmetric_key_with_associated_data,
+        encrypt::encrypt_using_symmetric_key_with_associated_data,
         keys::{KeyUsage, derive_key},
     },
     mls::{
@@ -124,10 +124,14 @@ impl SealingKey {
         key: &[u8],
         payload: &[u8],
     ) -> Result<Vec<u8>, MlsError> {
-        let bound_payload = bind(namespace, key, payload);
+        let payload = Zeroizing::new(payload.to_vec());
 
-        let encrypted = encrypt_using_symmetric_key(&self.key, &bound_payload)
-            .map_err(|_| MlsError::StorageIntegrityFailed)?;
+        let encrypted = encrypt_using_symmetric_key_with_associated_data(
+            &self.key,
+            &payload,
+            &slot(namespace, key),
+        )
+        .map_err(|_| MlsError::StorageIntegrityFailed)?;
 
         let mut sealed = encrypted.nonce;
         sealed.extend_from_slice(&encrypted.ciphertext);
@@ -164,66 +168,25 @@ impl SealingKey {
 
         let (nonce, ciphertext) = sealed.split_at(NONCE_LENGTH);
 
-        let bound_payload =
-            decrypt_using_symmetric_key(&self.key, &ciphertext.to_vec(), &nonce.to_vec())
-                .map_err(|_| MlsError::StorageIntegrityFailed)?;
-
-        unbind(namespace, key, bound_payload)
+        decrypt_using_symmetric_key_with_associated_data(
+            &self.key,
+            &ciphertext.to_vec(),
+            &nonce.to_vec(),
+            &slot(namespace, key),
+        )
+        .map(Zeroizing::new)
+        .map_err(|_| MlsError::StorageIntegrityFailed)
     }
 }
 
-/// Prefixes `payload` with the slot it belongs to, so the slot is covered by
-/// the AEAD tag.
-fn bind(namespace: MlsNamespace, key: &[u8], payload: &[u8]) -> Vec<u8> {
-    let key_length = key.len() as u32;
+/// The slot a record is sealed for, as the associated data that binds it there.
+///
+/// The tag has a fixed length, so no two slots give the same bytes.
+fn slot(namespace: MlsNamespace, key: &[u8]) -> Vec<u8> {
+    let mut slot = Vec::with_capacity(1 + key.len());
 
-    let mut bound = Vec::with_capacity(1 + 4 + key.len() + payload.len());
+    slot.push(namespace.tag());
+    slot.extend_from_slice(key);
 
-    bound.push(namespace.tag());
-    bound.extend_from_slice(&key_length.to_be_bytes());
-    bound.extend_from_slice(key);
-    bound.extend_from_slice(payload);
-
-    bound
-}
-
-/// Verifies the slot a decrypted record claims and strips it back off.
-fn unbind(
-    namespace: MlsNamespace,
-    key: &[u8],
-    bound_payload: Vec<u8>,
-) -> Result<Zeroizing<Vec<u8>>, MlsError> {
-    let bound_payload = Zeroizing::new(bound_payload);
-
-    // Namespace tag plus the big endian key length.
-    let header_length = 1 + 4;
-
-    if bound_payload.len() < header_length {
-        return Err(MlsError::StorageIntegrityFailed);
-    }
-
-    if bound_payload[0] != namespace.tag() {
-        return Err(MlsError::StorageIntegrityFailed);
-    }
-
-    let key_length = u32::from_be_bytes([
-        bound_payload[1],
-        bound_payload[2],
-        bound_payload[3],
-        bound_payload[4],
-    ]) as usize;
-
-    let payload_start = header_length
-        .checked_add(key_length)
-        .ok_or(MlsError::StorageIntegrityFailed)?;
-
-    if bound_payload.len() < payload_start {
-        return Err(MlsError::StorageIntegrityFailed);
-    }
-
-    if &bound_payload[header_length..payload_start] != key {
-        return Err(MlsError::StorageIntegrityFailed);
-    }
-
-    Ok(Zeroizing::new(bound_payload[payload_start..].to_vec()))
+    slot
 }

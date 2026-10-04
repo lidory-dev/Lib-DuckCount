@@ -1,4 +1,4 @@
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use aes_siv::{Aes256SivAead, Key as KeySiv, Nonce as NonceSiv};
@@ -117,6 +117,67 @@ pub fn decrypt_using_symmetric_key(
     ciphertext: &Vec<u8>,
     nonce: &Vec<u8>,
 ) -> Result<Vec<u8>, EncryptionError> {
+    decrypt_using_symmetric_key_with_associated_data(key, ciphertext, nonce, &Vec::new())
+}
+
+/// Decrypts ciphertext sealed by
+/// [`encrypt_using_symmetric_key_with_associated_data`](crate::cryptography::encryption::encrypt::encrypt_using_symmetric_key_with_associated_data),
+/// which only succeeds with the same `associated_data` it was sealed with.
+/// [`decrypt_using_symmetric_key`] is this with none.
+///
+/// # Arguments
+///
+/// * `key` - A reference to a byte vector representing the symmetric encryption key.
+///           The key must be exactly `NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE` bytes long.
+/// * `ciphertext` - A reference to a byte vector containing the encrypted data to decrypt.
+/// * `nonce` - A reference to a byte vector representing the nonce used during encryption.
+/// * `associated_data` - What the ciphertext was bound to when it was sealed.
+///
+/// # Returns
+///
+/// * `Result<Vec<u8>, EncryptionError>` - The decrypted plaintext.
+///
+/// # Errors
+///
+/// * `EncryptionError::WrongKeySize` - If the provided key is not the correct size for AES-256-GCM.
+/// * `EncryptionError::DecryptionFailed` - If the key, nonce or associated data is not the one the
+///   ciphertext was sealed with, or the ciphertext is corrupted. AES-GCM reports them all alike.
+///
+/// # Example
+///
+/// ```rust
+/// use lib_duckcount::cryptography::encryption::{
+///     encrypt::encrypt_using_symmetric_key_with_associated_data,
+///     decrypt::decrypt_using_symmetric_key_with_associated_data,
+///     keys::generate_symmetric_encryption_key,
+/// };
+///
+/// let key = generate_symmetric_encryption_key();
+///
+/// let encrypted = encrypt_using_symmetric_key_with_associated_data(
+///     &key,
+///     &b"12.34".to_vec(),
+///     &b"amount".to_vec(),
+/// )
+/// .unwrap();
+///
+/// let decrypted = decrypt_using_symmetric_key_with_associated_data(
+///     &key,
+///     &encrypted.ciphertext,
+///     &encrypted.nonce,
+///     &b"amount".to_vec(),
+/// )
+/// .unwrap();
+///
+/// println!("Decrypted text: {:?}", decrypted);
+/// ```
+#[uniffi::export]
+pub fn decrypt_using_symmetric_key_with_associated_data(
+    key: &Vec<u8>,
+    ciphertext: &Vec<u8>,
+    nonce: &Vec<u8>,
+    associated_data: &Vec<u8>,
+) -> Result<Vec<u8>, EncryptionError> {
     let key: [u8; NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE] = key
         .to_owned()
         .try_into()
@@ -128,8 +189,13 @@ pub fn decrypt_using_symmetric_key(
     let nonce =
         Nonce::from_exact_iter(nonce.iter().copied()).ok_or(EncryptionError::DecryptionFailed)?;
 
+    let payload = Payload {
+        msg: ciphertext,
+        aad: associated_data,
+    };
+
     let plain_text = cipher
-        .decrypt(&nonce, ciphertext.as_ref())
+        .decrypt(&nonce, payload)
         .map_err(|_| EncryptionError::DecryptionFailed)?;
 
     Ok(plain_text)

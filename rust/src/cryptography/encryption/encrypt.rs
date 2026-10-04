@@ -1,4 +1,4 @@
-use aes_gcm::aead::Aead;
+use aes_gcm::aead::{Aead, Payload};
 
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit};
 use aes_siv::{Aes256SivAead, Key as KeySiv, Nonce as NonceSiv};
@@ -111,6 +111,58 @@ pub fn encrypt_using_symmetric_key(
     key: &Vec<u8>,
     plaintext_message: &Vec<u8>,
 ) -> Result<EncryptedField, EncryptionError> {
+    encrypt_using_symmetric_key_with_associated_data(key, plaintext_message, &Vec::new())
+}
+
+/// Encrypts plaintext using a symmetric key and a randomly generated nonce, authenticating
+/// `associated_data` along with it.
+///
+/// The associated data is neither encrypted nor part of the result. It says what the
+/// ciphertext is *for*, and decrypting with anything else fails, so bytes sealed for one
+/// purpose cannot be passed off as another's, even under the same key.
+/// [`encrypt_using_symmetric_key`] is this with none.
+///
+/// # Arguments
+///
+/// * `key` - A reference to a byte vector representing the symmetric encryption key.
+///           The key must be exactly `NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE` bytes long.
+/// * `plaintext_message` - A reference to a byte vector containing the data to encrypt.
+/// * `associated_data` - What the ciphertext is bound to; decrypting needs the same bytes.
+///
+/// # Returns
+///
+/// * `Result<EncryptedField, EncryptionError>` - The ciphertext and the generated nonce.
+///
+/// # Errors
+///
+/// * `EncryptionError::WrongKeySize` - If the provided key is not the correct size for AES-256-GCM.
+/// * `EncryptionError::EncryptionFailed` - If the encryption process fails.
+///
+/// # Example
+///
+/// ```rust
+/// use lib_duckcount::cryptography::encryption::{
+///     encrypt::encrypt_using_symmetric_key_with_associated_data,
+///     keys::generate_symmetric_encryption_key,
+/// };
+///
+/// let key = generate_symmetric_encryption_key();
+///
+/// let encrypted = encrypt_using_symmetric_key_with_associated_data(
+///     &key,
+///     &b"12.34".to_vec(),
+///     &b"amount".to_vec(),
+/// )
+/// .unwrap();
+///
+/// println!("Ciphertext: {:?}, Nonce: {:?}", encrypted.ciphertext, encrypted.nonce);
+/// ```
+#[uniffi::export]
+pub fn encrypt_using_symmetric_key_with_associated_data(
+    key: &Vec<u8>,
+    plaintext_message: &Vec<u8>,
+    associated_data: &Vec<u8>,
+) -> Result<EncryptedField, EncryptionError> {
     let key: [u8; NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE] = key
         .to_owned()
         .try_into()
@@ -123,8 +175,13 @@ pub fn encrypt_using_symmetric_key(
 
     let nonce = Aes256Gcm::generate_nonce(&mut rng);
 
+    let payload = Payload {
+        msg: plaintext_message,
+        aad: associated_data,
+    };
+
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext_message.as_ref())
+        .encrypt(&nonce, payload)
         .map_err(|_| EncryptionError::EncryptionFailed)?;
 
     Ok(EncryptedField {
