@@ -7,6 +7,7 @@ mod tests {
     use mls_rs::extension::recommended::LastResortKeyPackageExt;
     use mls_rs::identity::SigningIdentity;
     use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
+    use mls_rs::time::MlsTime;
     use mls_rs::{
         CipherSuite, CipherSuiteProvider, Client, CryptoProvider, ExtensionList, MlsMessage,
     };
@@ -14,6 +15,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::cryptography::mls::client::MlsClient;
+    use crate::cryptography::mls::config::KEY_PACKAGE_LIFETIME;
     use crate::cryptography::mls::group::MlsGroup;
     use crate::cryptography::mls::one_time_expense::{
         OneTimeExpenseManifest, SealedValue, verify_one_time_expense,
@@ -44,6 +46,11 @@ mod tests {
         /// Every value currently stored, for inspecting what the host can see.
         fn values(&self) -> Vec<Vec<u8>> {
             self.records.lock().unwrap().values().cloned().collect()
+        }
+
+        /// How many records `namespace` holds.
+        fn count(&self, namespace: MlsNamespace) -> usize {
+            self.keys(namespace).unwrap().len()
         }
     }
 
@@ -829,6 +836,126 @@ mod tests {
         for one_time in &bundle.one_time_key_packages {
             assert!(!has_last_resort_extension(one_time));
         }
+    }
+
+    /// Seconds since the Unix epoch, as the expiry of a key package is kept.
+    fn now() -> u64 {
+        MlsTime::now().seconds_since_epoch()
+    }
+
+    #[test]
+    fn test_pruning_deletes_key_packages_only_once_they_have_expired() {
+        let bob = TestUser::new();
+
+        bob.client.generate_key_packages(3).unwrap();
+
+        // The last-resort key package and the three one-time ones.
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 4);
+
+        let expiry = now() + KEY_PACKAGE_LIFETIME.as_secs();
+
+        let pruned = bob
+            .client
+            .prune_key_packages_expired_before(expiry - 60 * 60)
+            .unwrap();
+
+        assert_eq!(pruned, 0);
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 4);
+
+        let pruned = bob
+            .client
+            .prune_key_packages_expired_before(expiry + 60 * 60)
+            .unwrap();
+
+        assert_eq!(pruned, 4);
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 0);
+    }
+
+    #[test]
+    fn test_a_welcome_to_a_pruned_key_package_cannot_be_joined() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let invitation = bob.invitation();
+
+        bob.client
+            .prune_key_packages_expired_before(now() + KEY_PACKAGE_LIFETIME.as_secs() + 60 * 60)
+            .unwrap();
+
+        let creation = alice.client.create_group(vec![invitation]).unwrap();
+
+        bob.client
+            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&alice]), true)
+            .expect_err("the secrets the Welcome was sealed to are gone");
+    }
+
+    #[test]
+    fn test_pruning_leaves_everything_but_key_packages_alone() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+
+        bob.client.generate_key_packages(2).unwrap();
+
+        bob.client
+            .prune_key_packages_expired_before(u64::MAX)
+            .unwrap();
+
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 0);
+
+        // The group, the pin of Alice, and Bob's own signature key all survive.
+        let message = groups[0]
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+
+        bob.reopen()
+            .load_group(groups[1].mls_group_id().unwrap())
+            .unwrap()
+            .process_incoming_message(message)
+            .unwrap();
+
+        assert!(
+            bob.client
+                .pinned_fingerprint(alice.uuid.clone())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn test_pruning_leaves_a_record_it_cannot_open_where_it_is() {
+        let bob = TestUser::new();
+
+        bob.client.generate_key_packages(1).unwrap();
+
+        bob.store
+            .put(MlsNamespace::KeyPackage, b"tampered".to_vec(), vec![0; 64])
+            .unwrap();
+
+        let pruned = bob
+            .client
+            .prune_key_packages_expired_before(u64::MAX)
+            .unwrap();
+
+        assert_eq!(pruned, 2);
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 1);
+    }
+
+    #[test]
+    fn test_pruning_now_keeps_freshly_generated_key_packages() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let invitation = bob.invitation();
+
+        assert_eq!(bob.client.prune_key_packages().unwrap(), 0);
+
+        let creation = alice.client.create_group(vec![invitation]).unwrap();
+
+        bob.client
+            .join_group(creation.welcomes[0].welcome.clone(), uuids(&[&alice]), true)
+            .unwrap();
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use mls_rs::identity::SigningIdentity;
+use mls_rs::time::MlsTime;
 use mls_rs::{Client, ExtensionList, MlsMessage};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use rand::RngCore;
@@ -10,7 +11,7 @@ use rand::rngs::OsRng;
 
 use crate::cryptography::mls::{
     MlsError,
-    config::{DuckCountMlsConfig, build_client},
+    config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
     group::{MlsGroup, expected_peers, pin_peers},
     identity::{
         credential::credential_for,
@@ -64,6 +65,7 @@ pub struct MlsClient {
     signature_key_pair: SignatureKeyPair,
     pins: IdentityPinStore,
     group_states: SealedGroupStateStorage,
+    key_packages: SealedKeyPackageStorage,
 }
 
 #[uniffi::export]
@@ -219,6 +221,27 @@ impl MlsClient {
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
         generate_key_packages(&client, one_time_count)
+    }
+
+    /// Deletes the secrets of the key packages that expired long enough ago
+    /// that no Welcome can still need them, and returns how many went.
+    ///
+    /// Call it after publishing, which is when they pile up, and only once
+    /// nothing waiting for the user on the server is left unread. See
+    /// [`KEY_PACKAGE_RETENTION_AFTER_EXPIRY`](crate::cryptography::mls::config::KEY_PACKAGE_RETENTION_AFTER_EXPIRY)
+    /// for how long an expired key package is kept, and why.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::StorageFailed` - If the host storage fails. The records
+    ///   deleted before it did stay deleted.
+    pub fn prune_key_packages(&self) -> Result<u32, MlsError> {
+        let expired_before = MlsTime::now()
+            .seconds_since_epoch()
+            .saturating_sub(KEY_PACKAGE_RETENTION_AFTER_EXPIRY.as_secs());
+
+        self.prune_key_packages_expired_before(expired_before)
     }
 
     /// Creates a group containing this user and the given invitees.
@@ -474,11 +497,7 @@ impl MlsClient {
     /// * `MlsError::IdentityKeyMismatch` - If a different key is already pinned.
     /// * `MlsError::StorageFailed` - If the host storage fails.
     /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
-    pub fn pin_identity(
-        &self,
-        user_uuid: String,
-        signature_key: Vec<u8>,
-    ) -> Result<(), MlsError> {
+    pub fn pin_identity(&self, user_uuid: String, signature_key: Vec<u8>) -> Result<(), MlsError> {
         self.pins.verify_or_pin(&user_uuid, &signature_key)
     }
 
@@ -517,6 +536,21 @@ impl std::fmt::Debug for MlsClient {
 }
 
 impl MlsClient {
+    /// [`MlsClient::prune_key_packages`], deleting the key packages that
+    /// expired before `expired_before`, in seconds since the Unix epoch, so a
+    /// test can stand in for the months it takes.
+    pub(crate) fn prune_key_packages_expired_before(
+        &self,
+        expired_before: u64,
+    ) -> Result<u32, MlsError> {
+        // Under the client lock, like every other MLS operation: a join reads
+        // the record of the key package its Welcome was sealed to, then
+        // deletes it.
+        let _client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+
+        self.key_packages.prune_expired(expired_before)
+    }
+
     /// Wires the storage adapters and the mls-rs client together.
     fn assemble(
         user_uuid: String,
@@ -536,7 +570,7 @@ impl MlsClient {
         let client = build_client(
             signing_identity,
             signature_key_pair.secret.clone(),
-            key_packages,
+            key_packages.clone(),
             group_states.clone(),
             PinningIdentityProvider::new(pins.clone()),
         );
@@ -547,6 +581,7 @@ impl MlsClient {
             signature_key_pair,
             pins,
             group_states,
+            key_packages,
         })
     }
 }

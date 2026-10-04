@@ -32,7 +32,21 @@ use crate::cryptography::mls::{
 /// longest a client may go without republishing. Ninety days is long enough
 /// that an infrequently used install still works and short enough that an
 /// abandoned key package stops being usable within a season.
-const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+pub(crate) const KEY_PACKAGE_LIFETIME: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+
+/// How long the secrets of a key package are kept once it has expired.
+///
+/// No peer builds a Welcome from an expired key package, since the commit that
+/// adds the user checks its lifetime, but one built just before expiry can
+/// still be on its way: a DuckCount peer keeps attaching a Welcome to what it
+/// sends for up to a week, and it then waits on the server for as long as the
+/// host leaves it unread. So the host prunes only once it has read everything
+/// waiting for it, and this only has to cover what can still arrive after
+/// that, the week a Welcome is attached and any difference between the two
+/// clocks, which ninety days does many times over. Older ones are deleted by
+/// [`MlsClient::prune_key_packages`](crate::cryptography::mls::client::MlsClient::prune_key_packages).
+pub(crate) const KEY_PACKAGE_RETENTION_AFTER_EXPIRY: Duration =
+    Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The fully resolved provider set of a DuckCount MLS client.
 ///
