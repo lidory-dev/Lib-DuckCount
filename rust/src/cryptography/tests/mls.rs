@@ -5,6 +5,7 @@ mod tests {
 
     use mls_rs::extension::MlsExtension;
     use mls_rs::extension::recommended::LastResortKeyPackageExt;
+    use mls_rs::group::ContentType;
     use mls_rs::identity::SigningIdentity;
     use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
     use mls_rs::time::MlsTime;
@@ -472,15 +473,10 @@ mod tests {
             .encrypt_application_message(b"hello".to_vec())
             .unwrap();
 
-        match receiver.process_incoming_message(message).unwrap() {
-            ProcessedMessage::ApplicationMessage {
-                is_sender_pinned, ..
-            } => is_sender_pinned,
-            other => panic!(
-                "expected an application message, got {:?}",
-                other_kind(&other)
-            ),
-        }
+        receiver
+            .read_application_message(message)
+            .unwrap()
+            .is_sender_pinned
     }
 
     #[test]
@@ -587,6 +583,161 @@ mod tests {
                 "nobody is pinned from a roster the host did not expect"
             );
         }
+    }
+
+    #[test]
+    fn test_an_application_message_is_read_with_its_sender() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (alice_group, bob_group) = open_request(&alice, &bob);
+
+        let message = alice_group
+            .encrypt_application_message(b"a card".to_vec())
+            .unwrap();
+
+        let read = bob_group.read_application_message(message).unwrap();
+
+        assert_eq!(read.sender_user_uuid, alice.uuid);
+        assert_eq!(read.payload, b"a card".to_vec());
+
+        // Bob opened the request without pinning anybody.
+        assert!(!read.is_sender_pinned);
+    }
+
+    #[test]
+    fn test_reading_an_application_message_refuses_a_commit_without_applying_it() {
+        // Mallory's request is opened, then she commits Carol in, sending the
+        // Commit where Victor only expects messages from her.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+        let carol = TestUser::new();
+
+        let (mallory_group, victor_group) = open_request(&mallory, &victor);
+        let epoch = victor_group.epoch().unwrap();
+
+        let commit = mallory_group
+            .add_members(vec![carol.invitation()])
+            .unwrap()
+            .commit;
+
+        let error = victor_group
+            .read_application_message(commit.clone())
+            .expect_err("a Commit must be refused");
+
+        assert!(matches!(error, MlsError::InvalidMessage));
+
+        // Nothing was applied or stored: the group Victor loads again holds
+        // the two of them, in the epoch he joined, which the Commit still fits.
+        let reloaded = victor
+            .client
+            .load_group(victor_group.mls_group_id().unwrap())
+            .unwrap();
+
+        let mut expected = uuids(&[&mallory, &victor]);
+        expected.sort();
+
+        assert_eq!(reloaded.epoch().unwrap(), epoch);
+        assert_eq!(member_uuids(&reloaded), expected);
+
+        assert!(matches!(
+            reloaded.process_incoming_message(commit).unwrap(),
+            ProcessedMessage::Commit { .. }
+        ));
+    }
+
+    #[test]
+    fn test_reading_an_application_message_refuses_a_proposal_without_keeping_it() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (alice_group, bob_group) = open_request(&alice, &bob);
+
+        let proposal = alice_group.propose_self_remove().unwrap();
+
+        let error = bob_group
+            .read_application_message(proposal.clone())
+            .expect_err("a Proposal must be refused");
+
+        assert!(matches!(error, MlsError::InvalidMessage));
+
+        // Nothing is pending, so Bob still sends.
+        bob_group
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+
+        // Kept, the same Proposal would stop him until somebody committed it.
+        bob_group.process_incoming_message(proposal).unwrap();
+
+        assert!(
+            bob_group
+                .encrypt_application_message(b"stuck".to_vec())
+                .is_err()
+        );
+    }
+
+    /// `message`, a PrivateMessage sent to the group `group_id`, with the
+    /// content type its header names changed from `from` to `to`.
+    fn relabelled(
+        mut message: Vec<u8>,
+        group_id: &[u8],
+        from: ContentType,
+        to: ContentType,
+    ) -> Vec<u8> {
+        // The version and the wire format, two bytes each, then the group id
+        // behind its variable-length size, then the eight-byte epoch.
+        let size_length = if group_id.len() < 64 { 1 } else { 2 };
+        let offset = 2 + 2 + size_length + group_id.len() + 8;
+
+        assert_eq!(
+            message[offset], from as u8,
+            "the header is not laid out as expected"
+        );
+
+        message[offset] = to as u8;
+        message
+    }
+
+    #[test]
+    fn test_a_commit_labelled_as_an_application_message_is_not_read() {
+        // The content type travels in the clear, so whoever relays a Commit,
+        // the server included, can relabel it to get it past the check. The
+        // label is authenticated with the message, which then fails to open.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+        let carol = TestUser::new();
+
+        let (mallory_group, victor_group) = open_request(&mallory, &victor);
+        let epoch = victor_group.epoch().unwrap();
+
+        let commit = mallory_group
+            .add_members(vec![carol.invitation()])
+            .unwrap()
+            .commit;
+
+        let relabelled = relabelled(
+            commit,
+            &victor_group.mls_group_id().unwrap(),
+            ContentType::Commit,
+            ContentType::Application,
+        );
+
+        let error = victor_group
+            .read_application_message(relabelled)
+            .expect_err("a relabelled Commit must not be read");
+
+        assert!(matches!(error, MlsError::ProtocolFailed(_)));
+
+        let reloaded = victor
+            .client
+            .load_group(victor_group.mls_group_id().unwrap())
+            .unwrap();
+
+        let mut expected = uuids(&[&mallory, &victor]);
+        expected.sort();
+
+        assert_eq!(reloaded.epoch().unwrap(), epoch);
+        assert_eq!(member_uuids(&reloaded), expected);
     }
 
     #[test]
@@ -752,6 +903,12 @@ mod tests {
 
         let error = groups[1]
             .process_incoming_message(proposal.to_bytes().unwrap())
+            .expect_err("a message sent in the clear must be refused");
+
+        assert!(matches!(error, MlsError::InvalidMessage));
+
+        let error = groups[1]
+            .read_application_message(proposal.to_bytes().unwrap())
             .expect_err("a message sent in the clear must be refused");
 
         assert!(matches!(error, MlsError::InvalidMessage));

@@ -34,8 +34,8 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use mls_rs::group::{CommitEffect, ReceivedMessage};
-use mls_rs::{Group, MlsMessage, WireFormat};
+use mls_rs::group::{ApplicationMessageDescription, CommitEffect, ContentType, ReceivedMessage};
+use mls_rs::{Group, MlsMessage, MlsMessageDescription, WireFormat};
 use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
@@ -44,7 +44,9 @@ use crate::cryptography::mls::{
     identity::{credential::user_uuid_from, fingerprint::fingerprint},
     invitation::{match_welcomes, pin_invitees, validate_invitees},
     storage::identity_pin::IdentityPinStore,
-    types::{AddMembersOutput, InviteeKeyPackage, MemberInfo, ProcessedMessage},
+    types::{
+        AddMembersOutput, ApplicationMessage, InviteeKeyPackage, MemberInfo, ProcessedMessage,
+    },
 };
 
 /// A group this user belongs to.
@@ -340,6 +342,10 @@ impl MlsGroup {
 
     /// Processes one message drained from the group's queue.
     ///
+    /// A Commit is applied and a Proposal kept, whichever member sent them. A
+    /// group whose members never change is read with
+    /// [`read_application_message`](Self::read_application_message) instead.
+    ///
     /// # Warning
     ///
     /// Messages must be processed in the order the server returned them
@@ -383,23 +389,12 @@ impl MlsGroup {
 
         let processed = match received {
             ReceivedMessage::ApplicationMessage(description) => {
-                let sender = group
-                    .member_at_index(description.sender_index)
-                    .ok_or_else(|| {
-                        MlsError::ProtocolFailed(
-                            "An application message came from an unknown member.".to_string(),
-                        )
-                    })?;
-
-                let sender_user_uuid = user_uuid_from(&sender.signing_identity.credential)?;
-
-                let is_sender_pinned = self.pins.pinned_key(&sender_user_uuid)?.as_deref()
-                    == Some(sender.signing_identity.signature_key.as_ref());
+                let read = self.application_message(&group, &description)?;
 
                 ProcessedMessage::ApplicationMessage {
-                    sender_user_uuid,
-                    payload: description.data().to_vec(),
-                    is_sender_pinned,
+                    sender_user_uuid: read.sender_user_uuid,
+                    payload: read.payload,
+                    is_sender_pinned: read.is_sender_pinned,
                 }
             }
             ReceivedMessage::Commit(description) => ProcessedMessage::Commit {
@@ -423,6 +418,82 @@ impl MlsGroup {
         group.write_to_storage()?;
 
         Ok(processed)
+    }
+
+    /// Reads one application message, refusing anything else before it can
+    /// change the group.
+    ///
+    /// For a group whose members are settled once it is created or joined,
+    /// such as one shared with a single peer. A member could otherwise commit
+    /// somebody else in behind the roster [`MlsClient::join_group`] checked, or
+    /// leave a Proposal pending, which stops the group sending until somebody
+    /// commits it.
+    ///
+    /// [`MlsClient::join_group`]: crate::cryptography::mls::client::MlsClient::join_group
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The ciphertext a peer sent to the group.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<ApplicationMessage, MlsError>` - The plaintext and its sender.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or is
+    ///   not an application message encrypted to the group.
+    /// * `MlsError::InvalidCredential` - If the sender's credential is malformed.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If the message belongs to another group, is
+    ///   for an epoch too old to still be retained, or fails authentication.
+    /// * `MlsError::StorageFailed` - If the sender's pin cannot be read, or the
+    ///   resulting state cannot be stored.
+    /// * `MlsError::StorageIntegrityFailed` - If the sender's stored pin fails
+    ///   authentication.
+    pub fn read_application_message(
+        &self,
+        message: Vec<u8>,
+    ) -> Result<ApplicationMessage, MlsError> {
+        let message = MlsMessage::from_bytes(&message).map_err(|_| MlsError::InvalidMessage)?;
+
+        // mls-rs applies a Commit and keeps a Proposal as it reads them, so what
+        // the message is has to be known first. A PrivateMessage names its
+        // content type in the clear, and its content is read as the type named:
+        // a member who labels anything else an application message only sends
+        // an application message, and a relay that relabels one fails its
+        // authentication. This also refuses a PublicMessage, see
+        // `process_incoming_message`.
+        let is_application_message = matches!(
+            message.description(),
+            MlsMessageDescription::PrivateProtocolMessage {
+                content_type: ContentType::Application,
+                ..
+            }
+        );
+
+        if !is_application_message {
+            return Err(MlsError::InvalidMessage);
+        }
+
+        let mut group = self.locked()?;
+
+        // Only there for the match to be exhaustive, the content being read as
+        // the type checked above. It returns before anything is stored all the
+        // same.
+        let ReceivedMessage::ApplicationMessage(description) =
+            group.process_incoming_message(message)?
+        else {
+            return Err(MlsError::ProtocolFailed(
+                "An application message was read as something else.".to_string(),
+            ));
+        };
+
+        let read = self.application_message(&group, &description)?;
+
+        group.write_to_storage()?;
+
+        Ok(read)
     }
 
     /// Applies the pending Commit, after the server accepted it.
@@ -475,6 +546,32 @@ impl MlsGroup {
             group: Mutex::new(group),
             pins,
         }
+    }
+
+    /// The application message `description` describes, with who sent it.
+    fn application_message(
+        &self,
+        group: &Group<DuckCountMlsConfig>,
+        description: &ApplicationMessageDescription,
+    ) -> Result<ApplicationMessage, MlsError> {
+        let sender = group
+            .member_at_index(description.sender_index)
+            .ok_or_else(|| {
+                MlsError::ProtocolFailed(
+                    "An application message came from an unknown member.".to_string(),
+                )
+            })?;
+
+        let sender_user_uuid = user_uuid_from(&sender.signing_identity.credential)?;
+
+        let is_sender_pinned = self.pins.pinned_key(&sender_user_uuid)?.as_deref()
+            == Some(sender.signing_identity.signature_key.as_ref());
+
+        Ok(ApplicationMessage {
+            sender_user_uuid,
+            payload: description.data().to_vec(),
+            is_sender_pinned,
+        })
     }
 
     /// Takes the group lock.

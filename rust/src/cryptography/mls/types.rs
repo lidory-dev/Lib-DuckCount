@@ -113,3 +113,20 @@ pub enum ProcessedMessage {
     /// The message was valid but carries nothing for the caller to act on.
     Ignored,
 }
+
+/// An application message, read out of a group by
+/// [`read_application_message`](crate::cryptography::mls::group::MlsGroup::read_application_message).
+#[derive(uniffi::Record, Debug)]
+pub struct ApplicationMessage {
+    /// UUID of the member that sent it.
+    pub sender_user_uuid: String,
+    /// The plaintext payload.
+    pub payload: Vec<u8>,
+    /// Whether it was signed with the key pinned for its sender.
+    ///
+    /// False for a sender nobody pinned yet, such as the sender of a contact
+    /// request not accepted yet, and for a leaf whose key was never checked
+    /// against the pin: mls-rs checks a leaf when it enters the group, not
+    /// against a pin taken later.
+    pub is_sender_pinned: bool,
+}
