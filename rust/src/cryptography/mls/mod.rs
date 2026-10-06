@@ -84,6 +84,12 @@ pub enum MlsError {
     MemberNotFound(String),
     /// An MLS message could not be decoded.
     InvalidMessage,
+    /// Storing a group would grow its state, or the record of an epoch it
+    /// retains, past the most a group may store, see `MAX_GROUP_STATE_LEN` in
+    /// `storage/group_state.rs`. Nothing was stored. A message refused this way
+    /// leaves the group as it was; after any other operation, the group in
+    /// memory may still hold the refused change, and has to be loaded again.
+    GroupStateTooLarge,
     /// A lock guarding MLS state was poisoned by a panic in another thread.
     LockPoisoned,
 }
@@ -116,6 +122,9 @@ impl Display for MlsError {
                 write!(f, "User {} is not a member of this group.", user_uuid)
             }
             MlsError::InvalidMessage => write!(f, "Invalid MLS message."),
+            MlsError::GroupStateTooLarge => {
+                write!(f, "The MLS group state would grow too large to store.")
+            }
             MlsError::LockPoisoned => write!(f, "MLS state lock was poisoned."),
         }
     }

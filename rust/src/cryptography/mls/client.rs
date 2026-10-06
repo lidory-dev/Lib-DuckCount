@@ -266,6 +266,8 @@ impl MlsClient {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::InvalidKeyPackage` - If a key package is unusable.
     /// * `MlsError::InvalidCredential` - If a key package asserts a different user
     ///   than the one it was fetched for.
@@ -361,6 +363,8 @@ impl MlsClient {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, or puts
     ///   the group at an epoch past 2^32 - 1, which no real group reaches.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs

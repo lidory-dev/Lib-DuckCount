@@ -676,6 +676,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_a_message_that_would_grow_the_group_past_its_limit_is_refused() {
+        // Mallory skips as many generations as she likes, message after
+        // message, and Victor keeps a key for every one of them.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+
+        let (mallory_group, victor_group) = open_request(&mallory, &victor);
+        let group_id = victor_group.mls_group_id().unwrap();
+
+        let stored = || {
+            victor
+                .store
+                .get(MlsNamespace::GroupState, group_id.clone())
+                .unwrap()
+                .unwrap()
+        };
+
+        let mut overtaken = Vec::new();
+        let mut refusal = None;
+
+        for _ in 0..10 {
+            let batch = (0..1000)
+                .map(|_| {
+                    mallory_group
+                        .encrypt_application_message(b"skipped".to_vec())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+
+            // The first of each batch is overtaken by its last, and read later.
+            overtaken.push(batch[0].clone());
+
+            let before = stored();
+
+            if let Err(error) = victor_group.read_application_message(batch[999].clone()) {
+                refusal = Some((error, before));
+                break;
+            }
+        }
+
+        let (error, before) = refusal.expect("the group must stop growing");
+
+        assert!(matches!(error, MlsError::GroupStateTooLarge));
+        assert!(overtaken.len() > 1, "a batch has to be taken in first");
+
+        // Nothing was stored.
+        assert_eq!(stored(), before);
+
+        // Nor kept in memory: a message overtaken before is still read, which a
+        // group grown past its limit could not store.
+        let read = victor_group
+            .read_application_message(overtaken[0].clone())
+            .unwrap();
+
+        assert_eq!(read.payload, b"skipped".to_vec());
+
+        // And Victor still sends.
+        let message = victor_group
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+
+        mallory_group.read_application_message(message).unwrap();
+    }
+
     /// `message`, a PrivateMessage sent to the group `group_id`, with the
     /// content type its header names changed from `from` to `to`.
     fn relabelled(

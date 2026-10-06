@@ -164,6 +164,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::InvalidKeyPackage` - If a key package is unusable.
     /// * `MlsError::InvalidCredential` - If a key package asserts a different user
     ///   than the one it was fetched for.
@@ -219,6 +221,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::MemberNotFound` - If a UUID is not a current member.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If a Commit is already pending, the list is
@@ -266,6 +270,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If a Commit is already pending, or the
     ///   Commit cannot be built.
@@ -297,6 +303,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If this user has already proposed their
     ///   own removal in this epoch.
@@ -326,6 +334,8 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
+    ///   group may store.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If proposals are pending and must be
     ///   committed first, or encryption fails.
@@ -364,6 +374,8 @@ impl MlsGroup {
     ///
     /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or was not
     ///   encrypted to the group.
+    /// * `MlsError::GroupStateTooLarge` - If what the message did would grow
+    ///   the group past the most a group may store.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
@@ -383,41 +395,39 @@ impl MlsGroup {
             return Err(MlsError::InvalidMessage);
         }
 
-        let mut group = self.locked()?;
+        self.change_and_store(|group| {
+            let received = group.process_incoming_message(message)?;
 
-        let received = group.process_incoming_message(message)?;
+            let processed = match received {
+                ReceivedMessage::ApplicationMessage(description) => {
+                    let read = self.application_message(group, &description)?;
 
-        let processed = match received {
-            ReceivedMessage::ApplicationMessage(description) => {
-                let read = self.application_message(&group, &description)?;
-
-                ProcessedMessage::ApplicationMessage {
-                    sender_user_uuid: read.sender_user_uuid,
-                    payload: read.payload,
-                    is_sender_pinned: read.is_sender_pinned,
-                }
-            }
-            ReceivedMessage::Commit(description) => ProcessedMessage::Commit {
-                // Absent when the committer removed themselves: by the time the
-                // Commit is applied they are no longer on the roster.
-                committer_user_uuid: Self::member_uuid(&group, description.committer),
-                epoch: group.current_epoch(),
-                removed_self: matches!(description.effect, CommitEffect::Removed { .. }),
-            },
-            ReceivedMessage::Proposal(description) => ProcessedMessage::Proposal {
-                sender_user_uuid: match description.sender {
-                    mls_rs::group::ProposalSender::Member(index) => {
-                        Self::member_uuid(&group, index)
+                    ProcessedMessage::ApplicationMessage {
+                        sender_user_uuid: read.sender_user_uuid,
+                        payload: read.payload,
+                        is_sender_pinned: read.is_sender_pinned,
                     }
-                    _ => None,
+                }
+                ReceivedMessage::Commit(description) => ProcessedMessage::Commit {
+                    // Absent when the committer removed themselves: by the time the
+                    // Commit is applied they are no longer on the roster.
+                    committer_user_uuid: Self::member_uuid(group, description.committer),
+                    epoch: group.current_epoch(),
+                    removed_self: matches!(description.effect, CommitEffect::Removed { .. }),
                 },
-            },
-            _ => ProcessedMessage::Ignored,
-        };
+                ReceivedMessage::Proposal(description) => ProcessedMessage::Proposal {
+                    sender_user_uuid: match description.sender {
+                        mls_rs::group::ProposalSender::Member(index) => {
+                            Self::member_uuid(group, index)
+                        }
+                        _ => None,
+                    },
+                },
+                _ => ProcessedMessage::Ignored,
+            };
 
-        group.write_to_storage()?;
-
-        Ok(processed)
+            Ok(processed)
+        })
     }
 
     /// Reads one application message, refusing anything else before it can
@@ -428,6 +438,11 @@ impl MlsGroup {
     /// somebody else in behind the roster [`MlsClient::join_group`] checked, or
     /// leave a Proposal pending, which stops the group sending until somebody
     /// commits it.
+    ///
+    /// A message that would grow the group past the most a group may store is
+    /// refused as well: mls-rs keeps a key for every generation its sender
+    /// skipped, and a peer skipping as many as allowed, message after message,
+    /// would otherwise grow the group without end.
     ///
     /// [`MlsClient::join_group`]: crate::cryptography::mls::client::MlsClient::join_group
     ///
@@ -443,6 +458,8 @@ impl MlsGroup {
     ///
     /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or is
     ///   not an application message encrypted to the group.
+    /// * `MlsError::GroupStateTooLarge` - If reading the message would grow the
+    ///   group past the most a group may store.
     /// * `MlsError::InvalidCredential` - If the sender's credential is malformed.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the message belongs to another group, is
@@ -476,24 +493,20 @@ impl MlsGroup {
             return Err(MlsError::InvalidMessage);
         }
 
-        let mut group = self.locked()?;
+        self.change_and_store(|group| {
+            // Only there for the match to be exhaustive, the content being read
+            // as the type checked above. It returns before anything is stored
+            // all the same.
+            let ReceivedMessage::ApplicationMessage(description) =
+                group.process_incoming_message(message)?
+            else {
+                return Err(MlsError::ProtocolFailed(
+                    "An application message was read as something else.".to_string(),
+                ));
+            };
 
-        // Only there for the match to be exhaustive, the content being read as
-        // the type checked above. It returns before anything is stored all the
-        // same.
-        let ReceivedMessage::ApplicationMessage(description) =
-            group.process_incoming_message(message)?
-        else {
-            return Err(MlsError::ProtocolFailed(
-                "An application message was read as something else.".to_string(),
-            ));
-        };
-
-        let read = self.application_message(&group, &description)?;
-
-        group.write_to_storage()?;
-
-        Ok(read)
+            self.application_message(group, &description)
+        })
     }
 
     /// Applies the pending Commit, after the server accepted it.
@@ -545,6 +558,46 @@ impl MlsGroup {
         MlsGroup {
             group: Mutex::new(group),
             pins,
+        }
+    }
+
+    /// Runs `change` on the group and stores what it did, leaving the group as
+    /// it was, in memory as in storage, when the change fails or is refused
+    /// for its size.
+    ///
+    /// mls-rs advances the group as it reads, keys skipped included, before
+    /// anything is stored. Left in memory, a change that was not stored would
+    /// be stored by whichever operation comes next, or, refused for its size,
+    /// make that one fail as well. Any other storage failure keeps the change
+    /// in memory, as storage may hold part of it already: epoch records are
+    /// written before the state.
+    fn change_and_store<T>(
+        &self,
+        change: impl FnOnce(&mut Group<DuckCountMlsConfig>) -> Result<T, MlsError>,
+    ) -> Result<T, MlsError> {
+        let mut group = self.locked()?;
+
+        let before = group.clone();
+
+        let value = match change(&mut group) {
+            Ok(value) => value,
+            Err(error) => {
+                *group = before;
+
+                return Err(error);
+            }
+        };
+
+        match group.write_to_storage().map_err(MlsError::from) {
+            Ok(()) => Ok(value),
+            Err(error) => {
+                // Refused before anything was written.
+                if matches!(error, MlsError::GroupStateTooLarge) {
+                    *group = before;
+                }
+
+                Err(error)
+            }
         }
     }
 

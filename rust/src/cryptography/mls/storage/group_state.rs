@@ -18,6 +18,34 @@ use crate::cryptography::mls::{
 /// in-memory provider retains.
 const MAX_EPOCH_RETENTION: usize = 3;
 
+/// The most a group may store, in bytes before sealing: its state, and the
+/// record of each epoch it retains.
+///
+/// A group's state grows with its members, and with the message keys mls-rs
+/// keeps for the generations a sender skipped, so that a message overtaken by
+/// a later one can still be read. One message can skip up to 1024 of them,
+/// some 35 KB, and a key nobody ever uses is never dropped: unbounded, a peer
+/// could grow a group without end, and every operation on it would load,
+/// unseal and store all of it again. A group shared with one peer starts near
+/// 12 KB, which leaves room for some fifteen thousand skipped keys: that many
+/// sends that never arrived, or some fifteen messages from a peer skipping as
+/// many as allowed.
+///
+/// Past that, a message that skips anything is refused, and as a refused
+/// message moves nothing forward, so is every later one from the same sender:
+/// the group is of no more use for reading them.
+///
+/// It bounds the members too: a group holding a pending Add stores some 9 KB
+/// per member, so somewhere past fifty members a Commit no longer fits.
+#[cfg(not(test))]
+pub(crate) const MAX_GROUP_STATE_LEN: usize = 512 * 1024;
+
+/// Small enough for a test to reach in two messages, and still above the most
+/// any other test stores, some 42 KB for a group of three holding a pending
+/// removal. A group of four holding a pending Add would not fit.
+#[cfg(test)]
+pub(crate) const MAX_GROUP_STATE_LEN: usize = 64 * 1024;
+
 /// Prefix of the [`MlsNamespace::Metadata`] key recording that a group was
 /// deleted. The group id follows it.
 const DELETED_GROUP_PREFIX: &[u8] = b"deleted-group/";
@@ -231,6 +259,22 @@ impl GroupStateStorage for SealedGroupStateStorage {
         epoch_inserts: Vec<EpochRecord>,
         epoch_updates: Vec<EpochRecord>,
     ) -> Result<(), Self::Error> {
+        // Refused before anything is written. The epochs are bounded as well: a
+        // message read in an epoch the group retains keeps the keys it skipped
+        // in that epoch's record.
+        let too_large = std::iter::once(&state.data)
+            .chain(
+                epoch_inserts
+                    .iter()
+                    .chain(&epoch_updates)
+                    .map(|epoch| &epoch.data),
+            )
+            .any(|data| data.len() > MAX_GROUP_STATE_LEN);
+
+        if too_large {
+            return Err(MlsError::GroupStateTooLarge);
+        }
+
         // Epochs are written first and the group state last: the state record is
         // the commit point. A crash between the two leaves epoch records nothing
         // refers to, which the next write overwrites, rather than a group state
@@ -247,7 +291,13 @@ impl GroupStateStorage for SealedGroupStateStorage {
             .put(MlsNamespace::GroupState, state.id.clone(), sealed)
             .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
 
-        self.trim_epochs(&state.id)
+        // Past the commit point, so a failure is not reported as a write that
+        // did not happen: the caller would try again what is already stored, a
+        // message read again once its key is spent. The next write trims what
+        // this one could not.
+        let _ = self.trim_epochs(&state.id);
+
+        Ok(())
     }
 
     fn max_epoch_id(&self, group_id: &[u8]) -> Result<Option<u64>, Self::Error> {
