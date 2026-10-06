@@ -466,6 +466,52 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_verifying_members_pins_nobody() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (_, bob_group) = open_request(&alice, &bob);
+
+        bob_group.verify_members(uuids(&[&alice])).unwrap();
+
+        assert!(
+            bob.client
+                .pinned_signature_key(alice.uuid.clone())
+                .unwrap()
+                .is_none(),
+            "an acceptance that is never taken must leave no pin behind"
+        );
+
+        // Once pinned, the same key still passes.
+        bob_group.pin_members(uuids(&[&alice])).unwrap();
+        bob_group.verify_members(uuids(&[&alice])).unwrap();
+    }
+
+    #[test]
+    fn test_verifying_members_refuses_a_key_pinned_differently_since_the_join() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let impostor = TestUser::new();
+
+        let (_, bob_group) = open_request(&alice, &bob);
+
+        bob.client
+            .pin_identity(alice.uuid.clone(), impostor.client.signature_public_key())
+            .unwrap();
+
+        assert!(matches!(
+            bob_group.verify_members(uuids(&[&alice])).unwrap_err(),
+            MlsError::IdentityKeyMismatch(uuid) if uuid == alice.uuid
+        ));
+
+        // The pin that was there stays as it was.
+        assert_eq!(
+            bob.client.pinned_signature_key(alice.uuid.clone()).unwrap(),
+            Some(impostor.client.signature_public_key())
+        );
+    }
+
     /// Whether `receiver` reads a message from `sender` as signed with the key
     /// pinned for them.
     fn reads_as_pinned(sender: &MlsGroup, receiver: &MlsGroup) -> bool {
@@ -570,6 +616,11 @@ mod tests {
 
         assert!(matches!(
             victor_group.pin_members(uuids(&[&mallory])).unwrap_err(),
+            MlsError::UnexpectedMembers
+        ));
+
+        assert!(matches!(
+            victor_group.verify_members(uuids(&[&mallory])).unwrap_err(),
             MlsError::UnexpectedMembers
         ));
 

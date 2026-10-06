@@ -111,9 +111,9 @@ impl MlsGroup {
     ///
     /// This is the host saying it trusts them, for a group it joined without
     /// pinning anybody, see [`MlsClient::join_group`]: for a contact request,
-    /// when the user accepts it. The roster is checked again because it can
-    /// have changed since the join, and a member who committed others in must
-    /// not get to decide who they are.
+    /// once the server has taken the user's acceptance. The roster is checked
+    /// again because it can have changed since the join, and a member who
+    /// committed others in must not get to decide who they are.
     ///
     /// [`MlsClient::join_group`]: crate::cryptography::mls::client::MlsClient::join_group
     ///
@@ -131,6 +131,36 @@ impl MlsGroup {
         let group = self.locked()?;
 
         pin_peers(&self.pins, &expected_peers(&group, expected_members)?)
+    }
+
+    /// Checks each of `expected_members` against the key pinned for them, if
+    /// any, provided the group still holds exactly this user and them. Pins
+    /// nobody.
+    ///
+    /// What [`pin_members`](Self::pin_members) checks, for a host about to
+    /// trust them with something before it is known whether that lands: for
+    /// a contact request, the acceptance the host sends. The request's sender
+    /// is pinned only once the server has taken it: pinned before, they would
+    /// stay pinned by an acceptance that was never taken.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::UnexpectedMembers` - If the members are no longer exactly
+    ///   this user and `expected_members`.
+    /// * `MlsError::IdentityKeyMismatch` - If a different key is pinned for one
+    ///   of them.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+    pub fn verify_members(&self, expected_members: Vec<String>) -> Result<(), MlsError> {
+        let group = self.locked()?;
+
+        expected_peers(&group, expected_members)?
+            .iter()
+            .try_for_each(|(user_uuid, signature_key)| {
+                self.pins.verify(user_uuid, signature_key.as_ref())
+            })
     }
 
     /// Whether a Commit is waiting to be applied or discarded.
