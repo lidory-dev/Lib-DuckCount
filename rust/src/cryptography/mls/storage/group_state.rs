@@ -101,15 +101,23 @@ impl SealedGroupStateStorage {
     /// record is written first, so a delete that fails leaves the group either
     /// stored or remembered, never joinable again.
     ///
+    /// It holds `openable_until`, when the last key package this device holds
+    /// as the group goes expires: the one any Welcome it was joined from was
+    /// sealed to is among them. Once they are all pruned, that Welcome can no
+    /// longer be opened, and [`prune_deleted_groups`](Self::prune_deleted_groups)
+    /// forgets the group. Taken from the key packages themselves rather than
+    /// from the clock now, which a device set wrong would have the record
+    /// forgotten while the Welcome still opens.
+    ///
     /// # Errors
     ///
     /// * `MlsError::StorageFailed` - If the host storage fails.
-    pub fn delete_group(&self, group_id: &[u8]) -> Result<(), MlsError> {
+    pub fn delete_group(&self, group_id: &[u8], openable_until: u64) -> Result<(), MlsError> {
         self.store
             .put(
                 MlsNamespace::Metadata,
                 Self::deleted_group_key(group_id),
-                Vec::new(),
+                openable_until.to_be_bytes().to_vec(),
             )
             .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
 
@@ -122,6 +130,51 @@ impl SealedGroupStateStorage {
         self.store
             .delete(MlsNamespace::GroupState, group_id.to_vec())
             .map_err(|error| MlsError::StorageFailed(error.to_string()))
+    }
+
+    /// Forgets the deleted groups whose Welcome no key package left can open,
+    /// those whose record holds an expiration before `expired_before`, in
+    /// seconds since the Unix epoch, and returns how many. Run right after the
+    /// key packages that expired before it are pruned, see
+    /// [`delete_group`](Self::delete_group).
+    ///
+    /// A peer can make this device join, and so in time delete, a group with
+    /// every message they send, and each would otherwise leave its record until
+    /// a log-out. A record whose expiration cannot be read is kept.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails. The records
+    ///   deleted before it did stay deleted.
+    pub fn prune_deleted_groups(&self, expired_before: u64) -> Result<u32, MlsError> {
+        let keys = self
+            .store
+            .keys(MlsNamespace::Metadata)
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
+        let mut pruned = 0;
+
+        for key in keys
+            .into_iter()
+            .filter(|key| key.starts_with(DELETED_GROUP_PREFIX))
+        {
+            let openable_until = self
+                .store
+                .get(MlsNamespace::Metadata, key.clone())
+                .map_err(|error| MlsError::StorageFailed(error.to_string()))?
+                .and_then(|value| <[u8; 8]>::try_from(value).ok())
+                .map(u64::from_be_bytes);
+
+            if openable_until.is_some_and(|openable_until| openable_until < expired_before) {
+                self.store
+                    .delete(MlsNamespace::Metadata, key)
+                    .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
+                pruned += 1;
+            }
+        }
+
+        Ok(pruned)
     }
 
     /// Builds the store key recording that a group was deleted.

@@ -74,15 +74,17 @@ pub enum MlsError {
     /// No group with the given MLS group id is stored locally.
     GroupNotFound,
     /// A Welcome is for a group this device has already joined, whether it
-    /// still holds it or deleted it since. Joining it again would put that
-    /// group back at the epoch the Welcome was for.
+    /// still holds it or deleted it since, until pruning forgets the deletion.
+    /// Joining it again would put that group back at the epoch the Welcome was
+    /// for.
     GroupAlreadyJoined,
     /// A group, one a Welcome is for or one already joined, holds members
     /// other than exactly this user and the ones the host expected.
     UnexpectedMembers,
     /// No member of the group holds the given user UUID.
     MemberNotFound(String),
-    /// An MLS message could not be decoded.
+    /// An MLS message could not be decoded, or describes a group no client of
+    /// this library produces.
     InvalidMessage,
     /// Storing a group would grow its state, or the record of an epoch it
     /// retains, past the most a group may store, see `MAX_GROUP_STATE_LEN` in

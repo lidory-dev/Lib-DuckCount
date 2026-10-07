@@ -32,6 +32,40 @@ impl SealedKeyPackageStorage {
         Self { store, sealing_key }
     }
 
+    /// When the last of the key packages this device holds expires, in seconds
+    /// since the Unix epoch, or `None` when it holds none it can open.
+    ///
+    /// What bounds the Welcomes it can still open: each was sealed to one of
+    /// them, and [`prune_expired`](Self::prune_expired) deletes them by this
+    /// same expiration.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    pub fn latest_expiration(&self) -> Result<Option<u64>, MlsError> {
+        let ids = self
+            .store
+            .keys(MlsNamespace::KeyPackage)
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
+
+        let mut latest = None;
+
+        for id in ids {
+            let expiration = match self.get(&id) {
+                Ok(Some(data)) => data.expiration,
+                // Gone since it was listed, or unreadable under this sealing key,
+                // and so of no use to a join made with it either, see
+                // `prune_expired`.
+                Ok(None) | Err(MlsError::StorageIntegrityFailed) => continue,
+                Err(error) => return Err(error),
+            };
+
+            latest = latest.max(Some(expiration));
+        }
+
+        Ok(latest)
+    }
+
     /// Deletes every record whose key package expired before `expired_before`,
     /// in seconds since the Unix epoch, and returns how many went.
     ///

@@ -226,6 +226,13 @@ impl MlsClient {
     /// Deletes the secrets of the key packages that expired long enough ago
     /// that no Welcome can still need them, and returns how many went.
     ///
+    /// The records of the deleted groups go too once every key package held
+    /// when they were deleted is pruned: no Welcome this device was joined from
+    /// can be opened again, so none can put such a group back at an epoch this
+    /// device held, see [`delete_group`](Self::delete_group). A later Welcome
+    /// re-adding this device to one of them, at a new epoch, is then joined like
+    /// any other.
+    ///
     /// Call it after publishing, which is when they pile up, and only once
     /// nothing waiting for the user on the server is left unread. See
     /// [`KEY_PACKAGE_RETENTION_AFTER_EXPIRY`](crate::cryptography::mls::config::KEY_PACKAGE_RETENTION_AFTER_EXPIRY)
@@ -348,7 +355,10 @@ impl MlsClient {
     /// A Welcome for a group this device has already joined is refused, even
     /// once the group is deleted. A last-resort key package survives the joins
     /// it serves, so the same Welcome can be replayed, and joining it again
-    /// would put the group back at the epoch the Welcome was for.
+    /// would put the group back at the epoch the Welcome was for. A deleted
+    /// group is forgotten once that key package is pruned, see
+    /// [`prune_key_packages`](Self::prune_key_packages): no such Welcome opens
+    /// by then.
     ///
     /// # Arguments
     ///
@@ -365,14 +375,17 @@ impl MlsClient {
     ///
     /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
     ///   group may store.
-    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, or puts
-    ///   the group at an epoch past 2^32 - 1, which no real group reaches.
+    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, puts the
+    ///   group at an epoch past 2^32 - 1, which no real group reaches, or is for
+    ///   a group whose id is not 32 bytes long, as every group this library
+    ///   creates has.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
     /// * `MlsError::UnexpectedMembers` - If the group's members are not exactly
     ///   this user and `expected_members`.
-    /// * `MlsError::GroupAlreadyJoined` - If this device has joined the group before.
+    /// * `MlsError::GroupAlreadyJoined` - If this device holds the group, or
+    ///   deleted it and has not forgotten it yet.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the Welcome is not addressed to this
     ///   user, or its one-time key package has already been used.
@@ -392,6 +405,13 @@ impl MlsClient {
         let (mut group, _) = client.join_group(None, &welcome, None)?;
 
         if group.current_epoch() > MAX_JOINED_EPOCH {
+            return Err(MlsError::InvalidMessage);
+        }
+
+        // The id becomes the key of the stored group, and of the record of its
+        // deletion, which outlives it. Whoever wrote the Welcome chose it, and
+        // only a fixed length stops them making it as large as they like.
+        if group.group_id().len() != GROUP_ID_LENGTH {
             return Err(MlsError::InvalidMessage);
         }
 
@@ -448,9 +468,19 @@ impl MlsClient {
     ///
     /// # Errors
     ///
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::StorageFailed` - If the host storage fails.
     pub fn delete_group(&self, mls_group_id: Vec<u8>) -> Result<(), MlsError> {
-        self.group_states.delete_group(&mls_group_id)
+        // Under the client lock, like every other MLS operation: a key package
+        // generated, and joined from, between reading them and writing the
+        // record would otherwise not count towards it.
+        let _client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+
+        // Holding none, it can open no Welcome, and the record may go at once.
+        let openable_until = self.key_packages.latest_expiration()?.unwrap_or(0);
+
+        self.group_states
+            .delete_group(&mls_group_id, openable_until)
     }
 
     /// The safety number pinned for another user, if they have been seen.
@@ -552,7 +582,13 @@ impl MlsClient {
         // deletes it.
         let _client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
-        self.key_packages.prune_expired(expired_before)
+        let pruned = self.key_packages.prune_expired(expired_before)?;
+
+        // By the same expiration: a record goes only once every key package it
+        // was deleted alongside has gone just now.
+        self.group_states.prune_deleted_groups(expired_before)?;
+
+        Ok(pruned)
     }
 
     /// Wires the storage adapters and the mls-rs client together.

@@ -1037,6 +1037,74 @@ mod tests {
         groups[0].process_incoming_message(message).unwrap();
     }
 
+    /// A Welcome for `joiner` into a group of `group_id_length` bytes, made by
+    /// a client other than this library, and the UUID of the one who made it.
+    fn foreign_welcome(joiner: &TestUser, group_id_length: usize) -> (Vec<u8>, String) {
+        let crypto_provider = crate::cryptography::mls::config::crypto_provider();
+        let cipher_suite_provider = crypto_provider.cipher_suite_provider(CIPHER_SUITE).unwrap();
+        let (secret, public) = cipher_suite_provider.signature_key_generate().unwrap();
+        let creator_uuid = Uuid::new_v4().to_string();
+
+        let creator = Client::builder()
+            .identity_provider(BasicIdentityProvider)
+            .crypto_provider(crypto_provider)
+            .signing_identity(
+                SigningIdentity::new(
+                    BasicCredential::new(creator_uuid.clone().into_bytes()).into_credential(),
+                    public,
+                ),
+                secret,
+                CIPHER_SUITE,
+            )
+            .build();
+
+        let mut group = creator
+            .create_group_with_id(
+                vec![7u8; group_id_length],
+                ExtensionList::default(),
+                ExtensionList::default(),
+                None,
+            )
+            .unwrap();
+
+        let key_package = MlsMessage::from_bytes(&joiner.invitation().key_package).unwrap();
+
+        let commit = group
+            .commit_builder()
+            .add_member(key_package)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        (commit.welcome_messages[0].to_bytes().unwrap(), creator_uuid)
+    }
+
+    #[test]
+    fn test_a_welcome_to_a_group_id_of_another_length_is_refused() {
+        // Every group this library creates has a 32-byte id. One of any other length
+        // was made elsewhere, and its id would become the key of a stored record, and of
+        // the record of its deletion, whose size its author chose.
+        let bob = TestUser::new();
+
+        // The same client's Welcome joins at the length this library uses.
+        let (welcome, creator) = foreign_welcome(&bob, 32);
+        bob.client.join_group(welcome, vec![creator], true).unwrap();
+
+        for length in [16, 4096] {
+            let bob = TestUser::new();
+            let (welcome, creator) = foreign_welcome(&bob, length);
+
+            let error = bob
+                .client
+                .join_group(welcome, vec![creator.clone()], true)
+                .expect_err("a group id of another length must be refused");
+
+            assert!(matches!(error, MlsError::InvalidMessage));
+            assert_eq!(bob.store.count(MlsNamespace::GroupState), 0);
+            assert!(bob.client.pinned_signature_key(creator).unwrap().is_none());
+        }
+    }
+
     #[test]
     fn test_a_welcome_is_never_joined_twice() {
         // A last-resort key package survives the joins it serves, so a Welcome
@@ -1216,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pruning_leaves_everything_but_key_packages_alone() {
+    fn test_pruning_leaves_groups_pins_and_the_signer_alone() {
         let alice = TestUser::new();
         let bob = TestUser::new();
 
@@ -1266,6 +1334,120 @@ mod tests {
 
         assert_eq!(pruned, 2);
         assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 1);
+    }
+
+    /// How many groups `user` keeps a record of having deleted.
+    fn deleted_group_records(user: &TestUser) -> usize {
+        user.store
+            .keys(MlsNamespace::Metadata)
+            .unwrap()
+            .iter()
+            .filter(|key| key.starts_with(b"deleted-group/"))
+            .count()
+    }
+
+    #[test]
+    fn test_the_record_of_a_deleted_group_goes_with_the_key_packages_held_then() {
+        // Joined through the last-resort key package, which survives the join.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let last_resort = InviteeKeyPackage {
+            user_uuid: bob.uuid.clone(),
+            key_package: bob
+                .client
+                .generate_key_packages(0)
+                .unwrap()
+                .last_resort_key_package,
+        };
+
+        let creation = alice.client.create_group(vec![last_resort]).unwrap();
+        let welcome = creation.welcomes[0].welcome.clone();
+
+        let group_id = bob
+            .client
+            .join_group(welcome.clone(), uuids(&[&alice]), true)
+            .unwrap();
+
+        bob.client.delete_group(group_id).unwrap();
+
+        assert_eq!(deleted_group_records(&bob), 1);
+
+        // While that key package is held the Welcome still opens, and the record
+        // is what refuses it.
+        bob.client
+            .prune_key_packages_expired_before(now() + KEY_PACKAGE_LIFETIME.as_secs() - 60)
+            .unwrap();
+
+        assert_eq!(deleted_group_records(&bob), 1);
+        assert!(matches!(
+            bob.client
+                .join_group(welcome.clone(), uuids(&[&alice]), true)
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
+
+        // Pruned with it, the record goes, and the Welcome no longer opens at all.
+        bob.client
+            .prune_key_packages_expired_before(now() + KEY_PACKAGE_LIFETIME.as_secs() + 60)
+            .unwrap();
+
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 0);
+        assert_eq!(deleted_group_records(&bob), 0);
+        assert!(
+            bob.client
+                .join_group(welcome, uuids(&[&alice]), true)
+                .is_err()
+        );
+        assert_eq!(bob.store.count(MlsNamespace::GroupState), 0);
+    }
+
+    #[test]
+    fn test_key_packages_generated_after_a_deletion_do_not_keep_its_record() {
+        // Taken from the key packages held at the deletion, not from the clock:
+        // those going is what lets it go, and newer ones do not keep it.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+
+        bob.client
+            .delete_group(groups[1].mls_group_id().unwrap())
+            .unwrap();
+
+        let record = bob
+            .store
+            .keys(MlsNamespace::Metadata)
+            .unwrap()
+            .into_iter()
+            .find(|key| key.starts_with(b"deleted-group/"))
+            .unwrap();
+
+        let openable_until = u64::from_be_bytes(
+            bob.store
+                .get(MlsNamespace::Metadata, record)
+                .unwrap()
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+
+        assert!(openable_until >= now() + KEY_PACKAGE_LIFETIME.as_secs() - 60);
+
+        // Generated after the deletion, so expiring after what the record holds.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        bob.client.generate_key_packages(1).unwrap();
+
+        bob.client
+            .prune_key_packages_expired_before(openable_until)
+            .unwrap();
+        assert_eq!(deleted_group_records(&bob), 1);
+
+        bob.client
+            .prune_key_packages_expired_before(openable_until + 1)
+            .unwrap();
+        assert_eq!(deleted_group_records(&bob), 0);
+        assert_eq!(bob.store.count(MlsNamespace::KeyPackage), 2);
     }
 
     #[test]
