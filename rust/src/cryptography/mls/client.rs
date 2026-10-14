@@ -21,7 +21,7 @@ use crate::cryptography::mls::{
     },
     invitation::{match_welcomes, pin_invitees, validate_invitees},
     key_package::generate_key_packages::generate_key_packages,
-    one_time_expense::{self, OneTimeExpenseManifest},
+    one_time_expense::{self, OneTimeExpenseManifest, OneTimeExpenseSettledMark},
     storage::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
         key_package::SealedKeyPackageStorage, sealed_record::SealingKey,
@@ -195,6 +195,23 @@ impl MlsClient {
         manifest: OneTimeExpenseManifest,
     ) -> Result<Vec<u8>, MlsError> {
         one_time_expense::sign(&self.signature_key_pair.secret, &self.user_uuid, manifest)
+    }
+
+    /// Signs the mark saying whether a one-time expense this user is the
+    /// creditor of has been paid back.
+    ///
+    /// See [`OneTimeExpenseSettledMark`] for what it covers, and
+    /// [`verify_one_time_expense_settled_mark`](one_time_expense::verify_one_time_expense_settled_mark)
+    /// for checking it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::ProtocolFailed` - If the mark cannot be encoded or signed.
+    pub fn sign_one_time_expense_settled_mark(
+        &self,
+        mark: OneTimeExpenseSettledMark,
+    ) -> Result<Vec<u8>, MlsError> {
+        one_time_expense::sign_settled_mark(&self.signature_key_pair.secret, &self.user_uuid, mark)
     }
 
     /// Generates key packages to publish so peers can add this user to groups

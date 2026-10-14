@@ -5,8 +5,8 @@ mod tests {
 
     use crate::cryptography::mls::config::generate_signature_key_pair;
     use crate::cryptography::mls::one_time_expense::{
-        OneTimeExpenseBeneficiary, OneTimeExpenseManifest, SealedValue, sign,
-        verify_one_time_expense,
+        OneTimeExpenseBeneficiary, OneTimeExpenseManifest, OneTimeExpenseSettledMark, SealedValue,
+        sign, sign_settled_mark, verify_one_time_expense, verify_one_time_expense_settled_mark,
     };
 
     struct Creditor {
@@ -61,7 +61,6 @@ mod tests {
     fn manifest() -> OneTimeExpenseManifest {
         OneTimeExpenseManifest {
             revision: 3,
-            is_settlement: false,
             title: sealed("title"),
             description: sealed("description"),
             amount: sealed("amount"),
@@ -100,7 +99,6 @@ mod tests {
 
         let changes: Vec<(&str, Change)> = vec![
             ("an older revision", |m| m.revision = 2),
-            ("the settlement flag", |m| m.is_settlement = true),
             ("the title's ciphertext", |m| m.title.ciphertext.push(0)),
             ("the title's nonce", |m| m.title.nonce.push(0)),
             ("the description", |m| m.description = sealed("other")),
@@ -180,6 +178,112 @@ mod tests {
                 alice.uuid.clone(),
                 key,
                 manifest(),
+                signature.clone(),
+            ));
+        }
+    }
+
+    fn settled_mark() -> OneTimeExpenseSettledMark {
+        OneTimeExpenseSettledMark {
+            expense_uuid: Uuid::new_v4().to_string(),
+            marked_at: 1_760_400_000_000,
+            is_settled: true,
+        }
+    }
+
+    impl Creditor {
+        fn sign_mark(&self, mark: &OneTimeExpenseSettledMark) -> Vec<u8> {
+            sign_settled_mark(&self.secret_key, &self.uuid, mark.clone()).unwrap()
+        }
+
+        fn verifies_mark(&self, mark: &OneTimeExpenseSettledMark, signature: &[u8]) -> bool {
+            verify_one_time_expense_settled_mark(
+                self.uuid.clone(),
+                self.public_key.to_vec(),
+                mark.clone(),
+                signature.to_vec(),
+            )
+        }
+    }
+
+    /// One way of tampering with a signed mark.
+    type MarkChange = fn(&mut OneTimeExpenseSettledMark);
+
+    #[test]
+    fn test_a_signed_settled_mark_verifies() {
+        let alice = Creditor::new();
+        let mark = settled_mark();
+
+        assert!(alice.verifies_mark(&mark, &alice.sign_mark(&mark)));
+    }
+
+    #[test]
+    fn test_any_change_to_a_signed_settled_mark_is_refused() {
+        let alice = Creditor::new();
+        let mark = settled_mark();
+        let signature = alice.sign_mark(&mark);
+
+        let changes: Vec<(&str, MarkChange)> = vec![
+            ("another expense", |m| {
+                m.expense_uuid = Uuid::new_v4().to_string()
+            }),
+            ("an earlier time", |m| m.marked_at -= 1),
+            ("a later time", |m| m.marked_at += 1),
+            ("the flag flipped", |m| m.is_settled = !m.is_settled),
+        ];
+
+        for (change, apply) in changes {
+            let mut changed = mark.clone();
+            apply(&mut changed);
+
+            assert!(
+                !alice.verifies_mark(&changed, &signature),
+                "{change} must not verify"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_settled_mark_is_refused_under_another_creditor() {
+        let alice = Creditor::new();
+        let mark = settled_mark();
+        let signature = alice.sign_mark(&mark);
+
+        assert!(!verify_one_time_expense_settled_mark(
+            Uuid::new_v4().to_string(),
+            alice.public_key.to_vec(),
+            mark,
+            signature,
+        ));
+    }
+
+    #[test]
+    fn test_a_participant_cannot_mark_an_expense_settled_for_the_creditor() {
+        // Carol holds the expense key, so she can seal a mark, but she signs it
+        // with her own key, not Alice's.
+        let alice = Creditor::new();
+        let carol = Creditor::new();
+        let mark = settled_mark();
+
+        let forged = sign_settled_mark(&carol.secret_key, &alice.uuid, mark.clone()).unwrap();
+
+        assert!(!alice.verifies_mark(&mark, &forged));
+    }
+
+    #[test]
+    fn test_malformed_settled_mark_keys_and_signatures_are_refused() {
+        let alice = Creditor::new();
+        let mark = settled_mark();
+        let signature = alice.sign_mark(&mark);
+
+        assert!(!alice.verifies_mark(&mark, &[]));
+        assert!(!alice.verifies_mark(&mark, &signature[1..]));
+
+        for key in [Vec::new(), vec![0; 3], vec![0; 32]] {
+            assert!(!verify_one_time_expense_settled_mark(
+                alice.uuid.clone(),
+                key,
+                mark.clone(),
                 signature.clone(),
             ));
         }

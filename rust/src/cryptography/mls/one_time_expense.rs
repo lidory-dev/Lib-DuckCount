@@ -2,11 +2,11 @@
 //!
 //! Every field of a one-time expense is sealed under a key all its participants
 //! hold, so a seal says nothing about who wrote it: any participant can seal new
-//! values, and what the server keeps in the clear (who paid, whether it is a
-//! settlement, who owes) is not sealed at all. The creditor therefore signs each
-//! version with their MLS identity key, over everything the server stores for
-//! it, and a participant accepts a version only when that signature checks out
-//! under the key they hold for the creditor.
+//! values, and what the server keeps in the clear (who paid, who owes) is not
+//! sealed at all. The creditor therefore signs each version with their MLS
+//! identity key, over everything the server stores for it, and a participant
+//! accepts a version only when that signature checks out under the key they
+//! hold for the creditor.
 //!
 //! What is signed is the sealed bytes rather than what they open to, so a
 //! version is checked before anything in it is decrypted. The expense's UUID is
@@ -19,6 +19,14 @@
 //! `SignContent` (RFC 9420, section 5.1.2) with a label of this crate's, and
 //! every MLS label starts with "MLS 1.0 ", which this one does not, so neither
 //! kind of signature can be passed off as the other.
+//!
+//! # Settled marks
+//!
+//! Whether the expense has been paid back is not part of a version: marking it
+//! is no edit, may happen any number of times, and leaves the versions as they
+//! are. The creditor signs it apart, as a [`OneTimeExpenseSettledMark`], under
+//! a label of its own, so that a version's signature cannot be passed off as a
+//! mark's or the other way round.
 
 use mls_rs::CipherSuiteProvider;
 use mls_rs_codec::{MlsEncode, MlsSize};
@@ -28,6 +36,9 @@ use crate::cryptography::mls::{MlsError, config::cipher_suite_provider};
 
 /// The `SignContent` label of a one-time expense signature.
 const LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpense";
+
+/// The `SignContent` label of a settled mark's signature.
+const SETTLED_MARK_LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpenseSettledMark";
 
 /// One sealed field, as the server stores it.
 #[derive(uniffi::Record, MlsSize, MlsEncode, Clone)]
@@ -53,13 +64,27 @@ pub struct OneTimeExpenseManifest {
     /// 0 for the version created, one more for each edit, so that a participant
     /// can refuse to go back to a version older than one it has shown.
     pub revision: u64,
-    pub is_settlement: bool,
     pub title: SealedValue,
     pub description: SealedValue,
     pub amount: SealedValue,
     pub currency: SealedValue,
     pub timestamp: SealedValue,
     pub beneficiaries: Vec<OneTimeExpenseBeneficiary>,
+}
+
+/// The creditor's mark saying whether a one-time expense has been paid back.
+///
+/// Unlike a version, it names its expense: nothing else ties a mark to one, the
+/// server keeping it next to whichever expense it likes.
+#[derive(uniffi::Record, MlsSize, MlsEncode, Clone)]
+pub struct OneTimeExpenseSettledMark {
+    pub expense_uuid: String,
+    /// When the creditor made it, in milliseconds since the Unix epoch, so that
+    /// a participant can refuse to go back to a mark older than one it has
+    /// shown. Their client never signs one older than the newest it has shown,
+    /// whatever its clock says.
+    pub marked_at: u64,
+    pub is_settled: bool,
 }
 
 /// Whether `signature` is `creditor_uuid`'s signature over `manifest`, made
@@ -82,17 +107,30 @@ pub fn verify_one_time_expense(
         return false;
     };
 
-    let Ok(cipher_suite_provider) = cipher_suite_provider() else {
+    verifies(creditor_signature_key, &signature, &signed)
+}
+
+/// Whether `signature` is `creditor_uuid`'s signature over `mark`, made with
+/// the private half of `creditor_signature_key`.
+///
+/// # Arguments
+///
+/// * `creditor_uuid` - The creditor of the expense the mark is about.
+/// * `creditor_signature_key` - The MLS signature public key held for them.
+/// * `mark` - The mark to check, naming the expense it was served with.
+/// * `signature` - The signature that came with it.
+#[uniffi::export]
+pub fn verify_one_time_expense_settled_mark(
+    creditor_uuid: String,
+    creditor_signature_key: Vec<u8>,
+    mark: OneTimeExpenseSettledMark,
+    signature: Vec<u8>,
+) -> bool {
+    let Ok(signed) = labelled(SETTLED_MARK_LABEL, &creditor_uuid, &mark) else {
         return false;
     };
 
-    cipher_suite_provider
-        .verify(
-            &SignaturePublicKey::new(creditor_signature_key),
-            &signature,
-            &signed,
-        )
-        .is_ok()
+    verifies(creditor_signature_key, &signature, &signed)
 }
 
 /// Signs `manifest` as `creditor_uuid`, whose MLS signature private key is
@@ -109,9 +147,40 @@ pub(crate) fn sign(
     let signed = to_be_signed(creditor_uuid, manifest)
         .map_err(|error| MlsError::ProtocolFailed(error.to_string()))?;
 
+    signs(secret_key, &signed)
+}
+
+/// Signs `mark` as `creditor_uuid`, whose MLS signature private key is
+/// `secret_key`.
+///
+/// # Errors
+///
+/// * `MlsError::ProtocolFailed` - If the mark cannot be encoded or signed.
+pub(crate) fn sign_settled_mark(
+    secret_key: &SignatureSecretKey,
+    creditor_uuid: &str,
+    mark: OneTimeExpenseSettledMark,
+) -> Result<Vec<u8>, MlsError> {
+    let signed = labelled(SETTLED_MARK_LABEL, creditor_uuid, &mark)
+        .map_err(|error| MlsError::ProtocolFailed(error.to_string()))?;
+
+    signs(secret_key, &signed)
+}
+
+fn signs(secret_key: &SignatureSecretKey, signed: &[u8]) -> Result<Vec<u8>, MlsError> {
     cipher_suite_provider()?
-        .sign(secret_key, &signed)
+        .sign(secret_key, signed)
         .map_err(|error| MlsError::ProtocolFailed(error.to_string()))
+}
+
+fn verifies(signature_key: Vec<u8>, signature: &[u8], signed: &[u8]) -> bool {
+    let Ok(cipher_suite_provider) = cipher_suite_provider() else {
+        return false;
+    };
+
+    cipher_suite_provider
+        .verify(&SignaturePublicKey::new(signature_key), signature, signed)
+        .is_ok()
 }
 
 /// The bytes a signature is made over: the creditor and the manifest, with the
@@ -124,11 +193,20 @@ fn to_be_signed(
         .beneficiaries
         .sort_by(|first, second| first.user_uuid.cmp(&second.user_uuid));
 
+    labelled(LABEL, creditor_uuid, &manifest)
+}
+
+/// The creditor and `signed`, wrapped in a `SignContent` labelled `label`.
+fn labelled(
+    label: &[u8],
+    creditor_uuid: &str,
+    signed: &impl MlsEncode,
+) -> Result<Vec<u8>, mls_rs_codec::Error> {
     let mut content = creditor_uuid.mls_encode_to_vec()?;
-    manifest.mls_encode(&mut content)?;
+    signed.mls_encode(&mut content)?;
 
     SignContent {
-        label: LABEL.to_vec(),
+        label: label.to_vec(),
         content,
     }
     .mls_encode_to_vec()

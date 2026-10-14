@@ -1180,7 +1180,6 @@ mod tests {
 
         let manifest = OneTimeExpenseManifest {
             revision: 0,
-            is_settlement: false,
             title: SealedValue {
                 nonce: b"nonce".to_vec(),
                 ciphertext: b"title".to_vec(),
