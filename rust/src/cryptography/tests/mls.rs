@@ -18,6 +18,7 @@ mod tests {
     use crate::cryptography::mls::client::MlsClient;
     use crate::cryptography::mls::config::KEY_PACKAGE_LIFETIME;
     use crate::cryptography::mls::group::MlsGroup;
+    use crate::cryptography::mls::identity::fingerprint::safety_number;
     use crate::cryptography::mls::one_time_expense::{
         OneTimeExpenseManifest, SealedValue, verify_one_time_expense,
     };
@@ -1310,7 +1311,7 @@ mod tests {
 
         assert!(
             bob.client
-                .pinned_fingerprint(alice.uuid.clone())
+                .pinned_signature_key(alice.uuid.clone())
                 .unwrap()
                 .is_some()
         );
@@ -1547,7 +1548,7 @@ mod tests {
         assert!(
             alice
                 .client
-                .pinned_fingerprint(bob.uuid.clone())
+                .pinned_signature_key(bob.uuid.clone())
                 .unwrap()
                 .is_some()
         );
@@ -1615,28 +1616,103 @@ mod tests {
     }
 
     #[test]
-    fn test_fingerprints_are_stable_and_agree_between_clients() {
+    fn test_both_users_see_the_same_safety_number() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        establish_group(&alice, &[&bob]);
+
+        let as_alice_sees_it = alice
+            .client
+            .safety_number(bob.uuid.clone())
+            .unwrap()
+            .expect("meeting bob pinned him");
+
+        assert_eq!(
+            bob.client.safety_number(alice.uuid.clone()).unwrap(),
+            Some(as_alice_sees_it.clone())
+        );
+
+        assert_eq!(
+            as_alice_sees_it,
+            safety_number(
+                &alice.uuid,
+                &alice.client.signature_public_key(),
+                &bob.uuid,
+                &bob.client.signature_public_key(),
+            )
+        );
+    }
+
+    #[test]
+    fn test_there_is_no_safety_number_with_somebody_never_pinned() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        assert_eq!(alice.client.safety_number(bob.uuid.clone()).unwrap(), None);
+    }
+
+    #[test]
+    fn test_a_safety_number_is_built_from_the_pinned_key() {
+        // What a man in the middle looks like: the server served Alice a key of
+        // its own for Bob, and that is the one she pinned, while Bob pinned
+        // Alice's real one.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let impostor = TestUser::new();
+
+        alice
+            .client
+            .pin_identity(bob.uuid.clone(), impostor.client.signature_public_key())
+            .unwrap();
+        bob.client
+            .pin_identity(alice.uuid.clone(), alice.client.signature_public_key())
+            .unwrap();
+
+        let as_alice_sees_it = alice.client.safety_number(bob.uuid.clone()).unwrap();
+        let as_bob_sees_it = bob.client.safety_number(alice.uuid.clone()).unwrap();
+
+        assert_eq!(
+            as_alice_sees_it,
+            Some(safety_number(
+                &alice.uuid,
+                &alice.client.signature_public_key(),
+                &bob.uuid,
+                &impostor.client.signature_public_key(),
+            ))
+        );
+        assert_ne!(as_alice_sees_it, as_bob_sees_it);
+
+        // Once Alice pins Bob's real key instead, the two agree.
+        alice.client.clear_identity_pin(bob.uuid.clone()).unwrap();
+        alice
+            .client
+            .pin_identity(bob.uuid.clone(), bob.client.signature_public_key())
+            .unwrap();
+
+        assert_eq!(
+            alice.client.safety_number(bob.uuid.clone()).unwrap(),
+            as_bob_sees_it
+        );
+    }
+
+    #[test]
+    fn test_a_member_s_fingerprint_is_their_half_of_the_safety_number() {
         let alice = TestUser::new();
         let bob = TestUser::new();
 
         let groups = establish_group(&alice, &[&bob]);
 
-        let bob_as_alice_sees_him = groups[0]
-            .members()
-            .unwrap()
-            .into_iter()
-            .find(|member| member.user_uuid == bob.uuid)
-            .unwrap()
-            .fingerprint;
-
-        assert_eq!(bob_as_alice_sees_him, bob.client.fingerprint());
+        let mut members = groups[0].members().unwrap();
+        members.sort_by(|first, second| first.user_uuid.cmp(&second.user_uuid));
 
         assert_eq!(
-            alice.client.pinned_fingerprint(bob.uuid.clone()).unwrap(),
-            Some(bob.client.fingerprint())
+            alice.client.safety_number(bob.uuid.clone()).unwrap(),
+            Some(format!(
+                "{} {}",
+                members[0].fingerprint, members[1].fingerprint
+            ))
         );
-
-        assert_ne!(alice.client.fingerprint(), bob.client.fingerprint());
     }
 
     #[test]
@@ -1736,7 +1812,7 @@ mod tests {
 
         let error = alice
             .client
-            .pinned_fingerprint(carol.uuid.clone())
+            .pinned_signature_key(carol.uuid.clone())
             .expect_err("a record moved between slots must not open");
 
         assert!(matches!(error, MlsError::StorageIntegrityFailed));

@@ -98,9 +98,14 @@ impl MlsGroup {
             .members()
             .iter()
             .map(|member| {
+                let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+
                 Ok(MemberInfo {
-                    user_uuid: user_uuid_from(&member.signing_identity.credential)?,
-                    fingerprint: fingerprint(member.signing_identity.signature_key.as_ref()),
+                    fingerprint: fingerprint(
+                        &user_uuid,
+                        member.signing_identity.signature_key.as_ref(),
+                    ),
+                    user_uuid,
                 })
             })
             .collect()

@@ -68,7 +68,9 @@ pub struct KeyPackageBundle {
 pub struct MemberInfo {
     /// UUID asserted by the member's credential.
     pub user_uuid: String,
-    /// Safety number of the member's signature key, for out-of-band comparison.
+    /// Fingerprint of the member's identity as this group holds it: their
+    /// half of every safety number they are part of, see
+    /// [`safety_number`](crate::cryptography::mls::identity::fingerprint::safety_number).
     pub fingerprint: String,
 }
 

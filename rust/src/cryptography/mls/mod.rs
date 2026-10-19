@@ -62,7 +62,7 @@ pub enum MlsError {
     /// This is either a legitimate key rotation or an impersonation attempt.
     /// The library cannot tell them apart, so it fails closed and leaves the
     /// decision to the user; see
-    /// [`clear_identity_pin`](identity::fingerprint::clear_identity_pin).
+    /// [`clear_identity_pin`](client::MlsClient::clear_identity_pin).
     IdentityKeyMismatch(String),
     /// A credential was not a basic credential holding a valid user UUID.
     InvalidCredential,

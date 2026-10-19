@@ -15,7 +15,7 @@ use crate::cryptography::mls::{
     group::{MlsGroup, expected_peers, pin_peers},
     identity::{
         credential::credential_for,
-        fingerprint::fingerprint,
+        fingerprint::safety_number,
         pinning_provider::PinningIdentityProvider,
         signature_key::{self, SignatureKeyPair},
     },
@@ -173,12 +173,6 @@ impl MlsClient {
     /// unencrypted, or persisted outside the vault.
     pub fn signature_private_key(&self) -> Vec<u8> {
         self.signature_key_pair.secret.as_ref().to_vec()
-    }
-
-    /// The safety number of the user's own signature key, for reading out to a
-    /// peer who is verifying them.
-    pub fn fingerprint(&self) -> String {
-        fingerprint(self.signature_key_pair.public.as_ref())
     }
 
     /// Signs one version of a one-time expense this user is the creditor of.
@@ -500,20 +494,43 @@ impl MlsClient {
             .delete_group(&mls_group_id, openable_until)
     }
 
-    /// The safety number pinned for another user, if they have been seen.
+    /// The safety number of this user and another, if a key is pinned for them.
     ///
-    /// Shown next to a peer so two users can compare the same string over a
-    /// channel the server does not control.
+    /// Both users' devices show the same sixty digits, see [`safety_number`],
+    /// as long as each holds the other's real key. Read to each other in person
+    /// or over a call the two trust, matching digits mean nobody stands between
+    /// them.
+    ///
+    /// Only the key pinned for the peer counts, never one a key package or
+    /// anything else the server serves carries: the pin is what every message
+    /// from them is checked against, so it is what the users have to verify.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_user_uuid` - The other user's UUID, in canonical hyphenated
+    ///   lowercase form.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Option<String>, MlsError>` - The safety number, or `None` when
+    ///   no key is pinned for them.
     ///
     /// # Errors
     ///
     /// * `MlsError::StorageFailed` - If the host storage fails.
     /// * `MlsError::StorageIntegrityFailed` - If the stored pin fails authentication.
-    pub fn pinned_fingerprint(&self, user_uuid: String) -> Result<Option<String>, MlsError> {
+    pub fn safety_number(&self, peer_user_uuid: String) -> Result<Option<String>, MlsError> {
         Ok(self
             .pins
-            .pinned_key(&user_uuid)?
-            .map(|signature_key| fingerprint(&signature_key)))
+            .pinned_key(&peer_user_uuid)?
+            .map(|peer_signature_key| {
+                safety_number(
+                    &self.user_uuid,
+                    self.signature_key_pair.public.as_ref(),
+                    &peer_user_uuid,
+                    &peer_signature_key,
+                )
+            }))
     }
 
     /// The signature key pinned for another user, if they have been seen.
@@ -558,10 +575,11 @@ impl MlsClient {
     /// # Warning
     ///
     /// This is the escape hatch for `IdentityKeyMismatch`, and it discards the
-    /// only evidence that something changed. Call it *after* the user has
-    /// compared the new safety number with the peer out of band, never
-    /// automatically in response to the error, which would reduce pinning to
-    /// no protection at all.
+    /// only evidence that something changed. Call it only once the user has
+    /// confirmed with the peer, out of band, that their key really changed,
+    /// never automatically in response to the error, which would reduce
+    /// pinning to no protection at all. The key pinned next is theirs to verify
+    /// again, with [`safety_number`](Self::safety_number).
     ///
     /// # Errors
     ///
