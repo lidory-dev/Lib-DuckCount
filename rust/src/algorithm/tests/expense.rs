@@ -5,7 +5,9 @@ mod tests {
     use crate::algorithm::{
         beneficiary::Beneficiary,
         currency::Currency,
-        expense::{Expense, ExpenseError, compute_beneficiaries, validate_expense},
+        expense::{
+            Expense, ExpenseError, compute_beneficiaries, max_beneficiaries, validate_expense,
+        },
     };
     use bigdecimal::{BigDecimal, Zero};
     use uuid::Uuid;
@@ -270,6 +272,14 @@ mod tests {
         vec![Beneficiary::new(&Uuid::new_v4().to_string(), share)]
     }
 
+    /// `count` distinct beneficiaries splitting €100 equally.
+    fn beneficiaries_sharing_100(count: usize) -> Vec<Beneficiary> {
+        let beneficiary_uuids: Vec<String> =
+            (0..count).map(|_| Uuid::new_v4().to_string()).collect();
+
+        compute_beneficiaries("100", &euro(), &beneficiary_uuids, &HashMap::new()).unwrap()
+    }
+
     #[test]
     fn test_validate_expense_accepts_what_the_app_writes() {
         let beneficiary_uuids = vec![
@@ -367,6 +377,70 @@ mod tests {
         assert_eq!(
             validate_expense("100", &euro(), &vec![]),
             Err(ExpenseError::NoBeneficiaries)
+        );
+    }
+
+    #[test]
+    fn test_max_beneficiaries_is_the_cap_the_api_enforces() {
+        // The API holds its own copy of the cap: the two must move together.
+        assert_eq!(max_beneficiaries(), 100);
+    }
+
+    #[test]
+    fn test_validate_expense_accepts_as_many_beneficiaries_as_the_cap() {
+        assert_eq!(
+            validate_expense("100", &euro(), &beneficiaries_sharing_100(100)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_one_beneficiary_over_the_cap() {
+        assert_eq!(
+            validate_expense("100", &euro(), &beneficiaries_sharing_100(101)),
+            Err(ExpenseError::TooManyBeneficiaries)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_checks_the_amount_before_counting_beneficiaries() {
+        let beneficiaries = beneficiaries_sharing_100(101);
+
+        assert_eq!(
+            validate_expense("1e2", &euro(), &beneficiaries),
+            Err(ExpenseError::MalformedAmount)
+        );
+        assert_eq!(
+            validate_expense("100.00", &yen(), &beneficiaries),
+            Err(ExpenseError::UnsupportedSubunits)
+        );
+        assert_eq!(
+            validate_expense("0", &euro(), &beneficiaries),
+            Err(ExpenseError::NonPositiveAmount)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_counts_beneficiaries_before_checking_any_of_them() {
+        let mut listed_twice = beneficiaries_sharing_100(101);
+        listed_twice[100].user_uuid = listed_twice[0].user_uuid.clone();
+
+        let mut malformed_share = beneficiaries_sharing_100(101);
+        malformed_share[100].share = String::from("1e-2");
+
+        let mut non_positive_share = beneficiaries_sharing_100(101);
+        non_positive_share[100].share = String::from("0");
+
+        for beneficiaries in [listed_twice, malformed_share, non_positive_share] {
+            assert_eq!(
+                validate_expense("100", &euro(), &beneficiaries),
+                Err(ExpenseError::TooManyBeneficiaries)
+            );
+        }
+
+        assert_eq!(
+            validate_expense("99", &euro(), &beneficiaries_sharing_100(101)),
+            Err(ExpenseError::TooManyBeneficiaries)
         );
     }
 

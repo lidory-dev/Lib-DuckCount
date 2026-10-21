@@ -52,6 +52,29 @@ pub enum ExpenseError {
     /// The same user is listed as a beneficiary more than once.
     #[error("The same user is listed as a beneficiary more than once.")]
     DuplicateBeneficiary,
+    /// An expense cannot list more than [MAX_BENEFICIARIES] beneficiaries.
+    #[error("An expense cannot list more than {MAX_BENEFICIARIES} beneficiaries.")]
+    TooManyBeneficiaries,
+}
+
+/// The most beneficiaries an expense may list, its creditor included when they are
+/// listed, whether it is a one-time expense or a group's.
+///
+/// Creating a one-time expense sends its key right away to every beneficiary but the
+/// creditor, one direct message each, and no beneficiary can open the expense before
+/// theirs arrives. The server's allowance of direct messages per sender is sized for two
+/// expenses this large a minute, so that a user writing expenses one after the other
+/// is never held back, and the server refuses a longer list of either kind anyway:
+/// checking here lets the app say so before anything is sent.
+pub const MAX_BENEFICIARIES: usize = 100;
+
+/// Exposes [`MAX_BENEFICIARIES`] to the foreign bindings so clients can show the
+/// limit and keep a selection within it instead of hardcoding it.
+///
+/// UniFFI has no `usize` support, so the value is narrowed to `u16`.
+#[uniffi::export]
+pub fn max_beneficiaries() -> u16 {
+    MAX_BENEFICIARIES as u16
 }
 
 /// The most digits an amount or a share may have before its decimal point: a thousand
@@ -411,6 +434,8 @@ pub fn compute_beneficiaries(
 /// This function will return an error if:
 /// - The expense amount is not greater than zero.
 /// - There are no beneficiaries.
+/// - There are more than [MAX_BENEFICIARIES] beneficiaries. The count is checked before
+///   any beneficiary is, so a list that is too long is refused for its length alone.
 /// - The sum of the shares exceeds the total expense amount.
 /// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
 /// - Any share amount is not positive.
@@ -460,6 +485,10 @@ pub fn validate_expense(
 
     if beneficiaries.is_empty() {
         return Err(ExpenseError::NoBeneficiaries);
+    }
+
+    if beneficiaries.len() > MAX_BENEFICIARIES {
+        return Err(ExpenseError::TooManyBeneficiaries);
     }
 
     let mut user_uuids = HashSet::with_capacity(beneficiaries.len());
