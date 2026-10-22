@@ -88,11 +88,13 @@ pub fn normalize_username(username: &str) -> String {
 /// ```
 #[uniffi::export]
 pub fn validate_username(username: &str) -> Result<(), UsernameError> {
-    let normalized_username = normalize_username(username);
-
-    if normalized_username.len() == 0 {
+    // Checked on what was typed: normalizing drops every character that is not an
+    // ASCII letter or digit, and "@" or "é" alone is not empty but invalid.
+    if username.trim().is_empty() {
         return Err(UsernameError::Empty);
     }
+
+    let normalized_username = normalize_username(username);
 
     if normalized_username.len() > USERNAME_MAXIMUM_LENGTH {
         return Err(UsernameError::TooLong);

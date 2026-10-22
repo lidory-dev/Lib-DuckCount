@@ -52,6 +52,16 @@ mod tests {
             validate_username("alicé").unwrap_err(),
             UsernameError::InvalidCharacter
         );
+        // Nothing is left of these once normalized, but something was typed: they
+        // are invalid rather than empty.
+        assert_eq!(
+            validate_username("@").unwrap_err(),
+            UsernameError::InvalidCharacter
+        );
+        assert_eq!(
+            validate_username("é").unwrap_err(),
+            UsernameError::InvalidCharacter
+        );
     }
 
     #[test]
