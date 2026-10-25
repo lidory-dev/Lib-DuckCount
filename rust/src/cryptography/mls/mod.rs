@@ -22,6 +22,7 @@
 pub mod client;
 pub mod config;
 pub mod group;
+pub mod group_id;
 pub mod identity;
 pub mod invitation;
 pub mod key_package;
@@ -43,6 +44,25 @@ use mls_rs_core::error::IntoAnyError;
 /// worth recording alongside each group so a future migration is a data change
 /// rather than a code change.
 pub const CIPHER_SUITE: CipherSuite = CipherSuite::ML_KEM_768_X25519;
+
+/// The most members a group may hold, its creator included.
+///
+/// Every member stores the whole ratchet tree, and the Welcome adding anybody
+/// carries it, so both grow with the group: a group of a hundred is created
+/// and joined in some 300 KB of state, within the most a group may store (see
+/// `MAX_GROUP_STATE_LEN` in `storage/group_state.rs`), and its one Welcome is
+/// about as large. The DuckCount API refuses a larger group too, and the two
+/// change together; a Welcome for one is refused on joining, whoever wrote it.
+pub const MAX_GROUP_MEMBERS: usize = 100;
+
+/// Exposes [`MAX_GROUP_MEMBERS`] to the foreign bindings so clients can show the
+/// limit and keep a selection within it instead of hardcoding it.
+///
+/// UniFFI has no `usize` support, so the value is narrowed to `u16`.
+#[uniffi::export]
+pub fn max_group_members() -> u16 {
+    MAX_GROUP_MEMBERS as u16
+}
 
 /// MLS related errors.
 #[derive(Debug, Clone, uniffi::Error)]
@@ -68,8 +88,13 @@ pub enum MlsError {
     InvalidCredential,
     /// A key package could not be parsed, or was not a key package at all.
     InvalidKeyPackage,
-    /// A Welcome message could not be matched back to the invitee it was
-    /// produced for. Carries the user UUID left without a Welcome.
+    /// The key packages fetched for some invitees are none they can be added
+    /// with: unparsable, not key packages, of another cipher suite, expired,
+    /// or asserting a user other than the one they were fetched for. Carries
+    /// the user UUID of every such invitee, in the order they were given.
+    UnusableKeyPackages(Vec<String>),
+    /// The Welcome a commit produced carries no secret for one of the invitees
+    /// it was built for. Carries that invitee's user UUID.
     UnmatchedWelcome(String),
     /// No group with the given MLS group id is stored locally.
     GroupNotFound,
@@ -78,9 +103,18 @@ pub enum MlsError {
     /// Joining it again would put that group back at the epoch the Welcome was
     /// for.
     GroupAlreadyJoined,
+    /// A Welcome is for a group whose id is not the one derived for the group
+    /// the host expects it to be, see [`group_id`]: whoever wrote it gave it
+    /// the id of another group, or one no client of this library derives.
+    UnexpectedGroupId,
     /// A group, one a Welcome is for or one already joined, holds members
-    /// other than exactly this user and the ones the host expected.
+    /// other than exactly this user and the ones the host expected, or a
+    /// Commit adding members would add somebody another member proposed too.
     UnexpectedMembers,
+    /// A group would hold more than [`MAX_GROUP_MEMBERS`] members: one being
+    /// created or added to, refused before anything is built, or one a
+    /// Welcome is for, refused before anything is stored or pinned.
+    TooManyMembers,
     /// No member of the group holds the given user UUID.
     MemberNotFound(String),
     /// An MLS message could not be decoded, or describes a group no client of
@@ -112,14 +146,34 @@ impl Display for MlsError {
             ),
             MlsError::InvalidCredential => write!(f, "Invalid MLS credential."),
             MlsError::InvalidKeyPackage => write!(f, "Invalid MLS key package."),
+            MlsError::UnusableKeyPackages(user_uuids) => write!(
+                f,
+                "The key packages of users {} cannot be used.",
+                user_uuids.join(", ")
+            ),
             MlsError::UnmatchedWelcome(user_uuid) => {
-                write!(f, "No Welcome message was produced for user {}.", user_uuid)
+                write!(
+                    f,
+                    "The Welcome message carries no secret for user {}.",
+                    user_uuid
+                )
             }
             MlsError::GroupNotFound => write!(f, "MLS group not found."),
             MlsError::GroupAlreadyJoined => write!(f, "MLS group already joined."),
+            MlsError::UnexpectedGroupId => {
+                write!(
+                    f,
+                    "The MLS group id is not the one the group is expected to have."
+                )
+            }
             MlsError::UnexpectedMembers => {
                 write!(f, "The MLS group does not hold the expected members.")
             }
+            MlsError::TooManyMembers => write!(
+                f,
+                "An MLS group cannot hold more than {} members.",
+                MAX_GROUP_MEMBERS
+            ),
             MlsError::MemberNotFound(user_uuid) => {
                 write!(f, "User {} is not a member of this group.", user_uuid)
             }

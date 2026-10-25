@@ -2,8 +2,9 @@
 mod tests {
     use uuid::Uuid;
 
+    use crate::cryptography::derived_uuid::derive;
     use crate::cryptography::one_time_expense_id::{
-        derive, is_one_time_expense_creditor, new_one_time_expense_id,
+        is_one_time_expense_creditor, new_one_time_expense_id,
     };
 
     #[test]

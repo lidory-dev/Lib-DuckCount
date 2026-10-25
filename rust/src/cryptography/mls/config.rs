@@ -80,10 +80,12 @@ pub fn mls_rules() -> DefaultMlsRules {
         // Welcome. This is already the mls-rs default; it is set explicitly
         // because turning it off would silently break every join.
         .with_ratchet_tree_extension(true)
-        // The DuckCount API takes one Welcome *per* invited member
-        // (`InvitedGroupMember`), so the single fan-out Welcome that mls-rs
-        // produces by default cannot be addressed to anyone.
-        .with_single_welcome_message(false)
+        // One Welcome for every member a commit adds, which the DuckCount API
+        // delivers once to each of them. This is the mls-rs default; it is set
+        // explicitly because a Welcome per member carries the whole ratchet
+        // tree each time, some 15 MB of Welcomes for a group of a hundred,
+        // where the one Welcome is under 300 KB.
+        .with_single_welcome_message(true)
         // An add-only commit may skip the update path under RFC 9420. Requiring
         // it costs one extra public key operation per commit in groups this
         // small, and buys post-compromise security on every commit rather than

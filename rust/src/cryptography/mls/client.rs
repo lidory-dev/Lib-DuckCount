@@ -4,37 +4,32 @@ use std::sync::{Arc, Mutex};
 
 use mls_rs::identity::SigningIdentity;
 use mls_rs::time::MlsTime;
-use mls_rs::{Client, ExtensionList, MlsMessage};
+use mls_rs::{Client, ExtensionList, Group, MlsMessage};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
-use rand::RngCore;
-use rand::rngs::OsRng;
 
 use crate::cryptography::mls::{
-    MlsError,
+    MAX_GROUP_MEMBERS, MlsError,
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
-    group::{MlsGroup, expected_peers, pin_peers},
+    group::{MlsGroup, expected_peers, peers, pin_peers},
+    group_id::{self, new_mls_group_id},
     identity::{
-        credential::credential_for,
+        credential::{credential_for, user_uuid_from},
         fingerprint::safety_number,
         pinning_provider::PinningIdentityProvider,
         signature_key::{self, SignatureKeyPair},
     },
-    invitation::{match_welcomes, pin_invitees, validate_invitees},
+    invitation::{
+        pin_invitees, shared_welcome, validate_invitees, welcome_payload,
+        welcome_payload_extensions,
+    },
     key_package::generate_key_packages::generate_key_packages,
     one_time_expense::{self, OneTimeExpenseManifest, OneTimeExpenseSettledMark},
     storage::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
         key_package::SealedKeyPackageStorage, sealed_record::SealingKey,
     },
-    types::{GroupCreation, InviteeKeyPackage, KeyPackageBundle},
+    types::{GroupCreation, InviteeKeyPackage, KeyPackageBundle, WelcomeInspection},
 };
-
-/// Length of a generated MLS group identifier, in bytes.
-///
-/// Group ids must be unique across every group a client belongs to, and are
-/// chosen by whoever creates the group. 32 random bytes make a collision
-/// impossible in practice without any coordination.
-const GROUP_ID_LENGTH: usize = 32;
 
 /// The highest epoch a Welcome may put a joined group at.
 ///
@@ -50,8 +45,9 @@ const MAX_JOINED_EPOCH: u64 = u32::MAX as u64;
 /// # Relationship to the DuckCount API
 ///
 /// Every method here produces bytes for exactly one API call, or consumes bytes
-/// from one. The client knows nothing about server group UUIDs, HTTP, or
-/// message ordering (those belong to the host).
+/// from one. The client knows nothing about HTTP or message ordering (those
+/// belong to the host), and of the API's group UUIDs only that the id of a
+/// group it holds is derived from one, see [`group_id`].
 ///
 /// # Threading
 ///
@@ -267,44 +263,75 @@ impl MlsClient {
     /// The group is created and the invitees added in one step, so the returned
     /// state is final: there is no Commit to distribute, because nobody else was
     /// in the group to receive one. That matches `POST /groups`, which takes
-    /// only the per-invitee Welcomes.
+    /// only the one Welcome every invitee joins from.
     ///
     /// The group exists locally as soon as this returns. If the server rejects
     /// the request, call [`delete_group`](Self::delete_group) to discard it.
     /// Each invitee's signature key is pinned to them either way.
     ///
+    /// `welcome_payload` is how the host hands the invitees what they need
+    /// beside the group itself, such as the key its own fields are sealed
+    /// with. It travels inside the Welcome, encrypted to them and signed by
+    /// this user, and each reads it back from
+    /// [`WelcomeInspection::welcome_payload`]. This library does not look
+    /// inside.
+    ///
+    /// The group's id is derived from `group_uuid`, see [`group_id`], which
+    /// the invitees join it as.
+    ///
     /// # Arguments
     ///
+    /// * `group_uuid` - The UUID the DuckCount API is to hold the group under,
+    ///   as [`new_group_id`](crate::cryptography::group_uuid::new_group_id)
+    ///   minted it for this user, or `None` for a group it holds none for: a
+    ///   direct channel or a contact request.
     /// * `invitees` - The user UUID and fetched key package of each invitee.
+    /// * `welcome_payload` - What to hand the invitees, if anything.
     ///
     /// # Returns
     ///
-    /// * `Result<GroupCreation, MlsError>` - The new group's id and one Welcome
-    ///   per invitee.
+    /// * `Result<GroupCreation, MlsError>` - The new group's id and the Welcome.
     ///
     /// # Errors
     ///
+    /// * `MlsError::TooManyMembers` - If the group would hold more than
+    ///   [`MAX_GROUP_MEMBERS`] members, this user included. Nothing is done.
     /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
     ///   group may store.
-    /// * `MlsError::InvalidKeyPackage` - If a key package is unusable.
-    /// * `MlsError::InvalidCredential` - If a key package asserts a different user
-    ///   than the one it was fetched for.
+    /// * `MlsError::UnusableKeyPackages` - Naming every invitee whose key
+    ///   package cannot be used, see [`validate_invitees`]. Nothing is done.
     /// * `MlsError::IdentityKeyMismatch` - If an invitee's signature key differs
     ///   from the one pinned for them.
-    /// * `MlsError::UnmatchedWelcome` - If any invitee ends up without a Welcome.
+    /// * `MlsError::UnmatchedWelcome` - If an invitee has no secret in the Welcome.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
-    /// * `MlsError::ProtocolFailed` - If the group or commit cannot be built.
+    /// * `MlsError::ProtocolFailed` - If `invitees` is empty (nothing is done),
+    ///   or the group or commit cannot be built.
     /// * `MlsError::StorageFailed` - If the new group cannot be stored.
     pub fn create_group(
         &self,
+        group_uuid: Option<String>,
         invitees: Vec<InviteeKeyPackage>,
+        welcome_payload: Option<Vec<u8>>,
     ) -> Result<GroupCreation, MlsError> {
+        // This user counts. Before anything else, so that a list the host let
+        // grow too long costs nothing, not even a pin.
+        if invitees.len() + 1 > MAX_GROUP_MEMBERS {
+            return Err(MlsError::TooManyMembers);
+        }
+
+        // A group of this user alone would have no Welcome to send, and the
+        // DuckCount API refuses to create one.
+        if invitees.is_empty() {
+            return Err(MlsError::ProtocolFailed(
+                "A group is created with at least one invitee.".to_string(),
+            ));
+        }
+
         let invitees = validate_invitees(invitees)?;
 
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
-        let mut group_id = vec![0u8; GROUP_ID_LENGTH];
-        OsRng.fill_bytes(&mut group_id);
+        let (group_id, mut group_info_extensions) = new_mls_group_id(group_uuid.as_deref());
 
         let mut group = client.create_group_with_id(
             group_id.clone(),
@@ -313,18 +340,11 @@ impl MlsClient {
             None,
         )?;
 
-        // A group with no invitees is just this user; there is nothing to commit
-        // and no Welcome to produce.
-        if invitees.is_empty() {
-            group.write_to_storage()?;
+        group_info_extensions.append(welcome_payload_extensions(welcome_payload));
 
-            return Ok(GroupCreation {
-                mls_group_id: group_id,
-                welcomes: Vec::new(),
-            });
-        }
-
-        let mut commit_builder = group.commit_builder();
+        let mut commit_builder = group
+            .commit_builder()
+            .set_group_info_ext(group_info_extensions);
 
         for invitee in &invitees {
             commit_builder = commit_builder.add_member(invitee.key_package.clone())?;
@@ -332,10 +352,10 @@ impl MlsClient {
 
         let commit_output = commit_builder.build()?;
 
-        // Matched before anything is persisted: a group that cannot produce a
-        // Welcome for every invitee is unusable, and failing here leaves no
+        // Checked before anything is persisted: a group whose Welcome does not
+        // open for every invitee is unusable, and failing here leaves no
         // orphaned state behind for the host to clean up blind.
-        let welcomes = match_welcomes(&commit_output.welcome_messages, &invitees)?;
+        let welcome = shared_welcome(&commit_output.welcome_messages, &invitees)?;
 
         pin_invitees(&self.pins, &invitees)?;
 
@@ -346,7 +366,83 @@ impl MlsClient {
 
         Ok(GroupCreation {
             mls_group_id: group_id,
-            welcomes,
+            welcome,
+        })
+    }
+
+    /// Reads what a Welcome says without joining the group it is for.
+    ///
+    /// It runs every check [`join_group`](Self::join_group) runs before it
+    /// stores the group but the one against the members the host expects,
+    /// which is what this tells it instead: who wrote the Welcome, who else is
+    /// in the group, and what was handed with it. It stores nothing, pins
+    /// nobody and spends no key package, so the Welcome joins afterwards all
+    /// the same.
+    ///
+    /// It exists for a host that decides whether to trust a Welcome from what
+    /// the Welcome itself says, its committer and its payload. That decision
+    /// has to come before [`join_group`](Self::join_group) stores the group,
+    /// since a group once stored can never be joined again, even if deleted at
+    /// once: a Welcome joined only to be found wanting, or left for later,
+    /// would leave its group unjoinable on this device. Once the host trusts
+    /// it, it joins with [`WelcomeInspection::member_uuids`] as the expected
+    /// members.
+    ///
+    /// The group's id is checked against the one derived for
+    /// `expected_group_uuid`, as on a join, so no Welcome to another group is
+    /// read as one to the group the host expects. What it cannot tell is the
+    /// Welcome the DuckCount API stored with a group it holds from one a
+    /// member posted there later, for a group of their own under the same
+    /// UUID, see [`group_id`]: the host inspects only the one it would join
+    /// from, as [`join_group`](Self::join_group) says.
+    ///
+    /// The members' keys are checked against those already pinned for them,
+    /// as on a join, so a Welcome whose committer the host has pinned was
+    /// signed with the pinned key.
+    ///
+    /// # Arguments
+    ///
+    /// * `welcome` - The Welcome ciphertext, as on
+    ///   [`join_group`](Self::join_group).
+    /// * `expected_group_uuid` - The UUID of the group the host expects it to
+    ///   be for, as on [`join_group`](Self::join_group).
+    ///
+    /// # Returns
+    ///
+    /// * `Result<WelcomeInspection, MlsError>` - Who wrote the Welcome, the
+    ///   other members, and what was handed with it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::TooManyMembers` - If the group holds more than
+    ///   [`MAX_GROUP_MEMBERS`] members.
+    /// * `MlsError::InvalidMessage` - As on [`join_group`](Self::join_group).
+    /// * `MlsError::UnexpectedGroupId` - As on [`join_group`](Self::join_group).
+    /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
+    ///   from the one pinned for them.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::GroupAlreadyJoined` - If this device holds the group, or
+    ///   deleted it and has not forgotten it yet.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If the Welcome is not addressed to this
+    ///   user, or its one-time key package has already been used.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    pub fn inspect_welcome(
+        &self,
+        welcome: Vec<u8>,
+        expected_group_uuid: Option<String>,
+    ) -> Result<WelcomeInspection, MlsError> {
+        let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+
+        let opened = self.open_welcome(&client, welcome, expected_group_uuid.as_deref())?;
+
+        Ok(WelcomeInspection {
+            committer_user_uuid: opened.committer_user_uuid,
+            member_uuids: peers(&opened.group)?
+                .into_iter()
+                .map(|(user_uuid, _)| user_uuid)
+                .collect(),
+            welcome_payload: opened.welcome_payload,
         })
     }
 
@@ -357,11 +453,38 @@ impl MlsClient {
     /// the users the host knows the Welcome to be about (for a contact
     /// request, its sender as the server authenticated them).
     ///
+    /// A host that cannot know them any better than the Welcome does takes
+    /// them from it, with [`inspect_welcome`](Self::inspect_welcome), once it
+    /// trusts its committer. A server's list of a group's members is one it
+    /// cannot go by: it is today's, while the Welcome's tree is of the epoch
+    /// it opens, and a member who has left since, with nobody committing their
+    /// removal yet, is still in the tree but gone from the list.
+    ///
     /// The members are checked against the keys already pinned for them, and
     /// only pinned when `pin_members` says the host already trusts them. A
     /// Welcome read to find out who sent it, and then refused, must not decide
     /// who anybody is: the host pins those with [`MlsGroup::pin_members`] once
     /// it trusts them.
+    ///
+    /// A Welcome for a group of more than [`MAX_GROUP_MEMBERS`] members is
+    /// refused as well, whoever wrote it, before anything is stored or pinned.
+    ///
+    /// So is one for any group but the one the host expects, before anything
+    /// looks the group up: its id has to be the one derived for
+    /// `expected_group_uuid`, see [`group_id`]. A channel or a contact request,
+    /// which a host joins from anybody, can then never take the id of a group
+    /// the DuckCount API holds, and no Welcome is joined as one to a group it
+    /// is not for.
+    ///
+    /// The id of a group the API holds is anybody's to derive who knows its
+    /// UUID, though, as every one of its members does, and any of them can
+    /// create a group of their own under it and post its Welcome to the
+    /// others, which the API lets any member do. Once this device joined
+    /// theirs, the refusal below would keep it out of the real one for good.
+    /// So a host joins a group the API holds only from the Welcome the API
+    /// stored with it, or with the addition of this user to it, which comes
+    /// first among the messages waiting for this user there, and never from
+    /// one posted later.
     ///
     /// A Welcome for a group this device has already joined is refused, even
     /// once the group is deleted. A last-resort key package survives the joins
@@ -369,27 +492,35 @@ impl MlsClient {
     /// would put the group back at the epoch the Welcome was for. A deleted
     /// group is forgotten once that key package is pruned, see
     /// [`prune_key_packages`](Self::prune_key_packages): no such Welcome opens
-    /// by then.
+    /// by then. With the id derived, and the Welcome to a group the API holds
+    /// the one it stored, a Welcome refused this way is one to the group this
+    /// device joined before, never a channel's or a contact request's that took
+    /// its id.
     ///
     /// # Arguments
     ///
-    /// * `welcome` - The Welcome ciphertext drained from the group's messages.
+    /// * `welcome` - The Welcome ciphertext: for a group the API holds, the one
+    ///   it stored with the group, see above.
+    /// * `expected_group_uuid` - The UUID the DuckCount API holds the group
+    ///   under, in canonical hyphenated lowercase form, or `None` for a group
+    ///   it holds none for: a direct channel or a contact request.
     /// * `expected_members` - The UUIDs of every member other than this user.
     /// * `pin_members` - Whether to pin them now.
     ///
     /// # Returns
     ///
-    /// * `Result<Vec<u8>, MlsError>` - The MLS group id of the joined group. The
-    ///   host is responsible for recording which server group UUID it belongs to.
+    /// * `Result<Vec<u8>, MlsError>` - The MLS group id of the joined group.
     ///
     /// # Errors
     ///
+    /// * `MlsError::TooManyMembers` - If the group holds more than
+    ///   [`MAX_GROUP_MEMBERS`] members.
     /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
     ///   group may store.
-    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, puts the
-    ///   group at an epoch past 2^32 - 1, which no real group reaches, or is for
-    ///   a group whose id is not 32 bytes long, as every group this library
-    ///   creates has.
+    /// * `MlsError::InvalidMessage` - If the Welcome cannot be parsed, or puts
+    ///   the group at an epoch past 2^32 - 1, which no real group reaches.
+    /// * `MlsError::UnexpectedGroupId` - If the group's id is not the one
+    ///   derived for `expected_group_uuid`.
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
@@ -404,33 +535,15 @@ impl MlsClient {
     pub fn join_group(
         &self,
         welcome: Vec<u8>,
+        expected_group_uuid: Option<String>,
         expected_members: Vec<String>,
         pin_members: bool,
     ) -> Result<Vec<u8>, MlsError> {
-        let welcome = MlsMessage::from_bytes(&welcome).map_err(|_| MlsError::InvalidMessage)?;
-
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
-        // Joined in memory only: mls-rs stores nothing, and spends no key
-        // package, until `write_to_storage`.
-        let (mut group, _) = client.join_group(None, &welcome, None)?;
+        let mut opened = self.open_welcome(&client, welcome, expected_group_uuid.as_deref())?;
 
-        if group.current_epoch() > MAX_JOINED_EPOCH {
-            return Err(MlsError::InvalidMessage);
-        }
-
-        // The id becomes the key of the stored group, and of the record of its
-        // deletion, which outlives it. Whoever wrote the Welcome chose it, and
-        // only a fixed length stops them making it as large as they like.
-        if group.group_id().len() != GROUP_ID_LENGTH {
-            return Err(MlsError::InvalidMessage);
-        }
-
-        if self.group_states.has_held(group.group_id())? {
-            return Err(MlsError::GroupAlreadyJoined);
-        }
-
-        let peers = expected_peers(&group, expected_members)?;
+        let peers = expected_peers(&opened.group, expected_members)?;
 
         // Before the group is stored, so that a join failing to store it can
         // simply be tried again: once stored, it is never joined again.
@@ -438,9 +551,9 @@ impl MlsClient {
             pin_peers(&self.pins, &peers)?;
         }
 
-        group.write_to_storage()?;
+        opened.group.write_to_storage()?;
 
-        Ok(group.group_id().to_vec())
+        Ok(opened.group.group_id().to_vec())
     }
 
     /// Opens a group this user already belongs to.
@@ -604,7 +717,75 @@ impl std::fmt::Debug for MlsClient {
     }
 }
 
+/// A Welcome joined in memory and checked, see [`MlsClient::open_welcome`].
+struct OpenedWelcome {
+    group: Group<DuckCountMlsConfig>,
+    committer_user_uuid: String,
+    welcome_payload: Option<Vec<u8>>,
+}
+
 impl MlsClient {
+    /// Joins the group `welcome` is for in memory, through every check a join
+    /// makes whoever the host expects in it, the group's id checked against
+    /// the one derived for `expected_group_uuid`.
+    ///
+    /// It changes nothing, whatever it returns: mls-rs stores nothing, and
+    /// spends no key package, until `write_to_storage`, and the identity
+    /// provider it checks every member with only reads their pins. That is
+    /// what lets [`inspect_welcome`](Self::inspect_welcome) and
+    /// [`join_group`](Self::join_group) share it.
+    ///
+    /// `client` is the client, locked by the caller for as long as it needs
+    /// the group.
+    fn open_welcome(
+        &self,
+        client: &Client<DuckCountMlsConfig>,
+        welcome: Vec<u8>,
+        expected_group_uuid: Option<&str>,
+    ) -> Result<OpenedWelcome, MlsError> {
+        let welcome = MlsMessage::from_bytes(&welcome).map_err(|_| MlsError::InvalidMessage)?;
+
+        let (group, new_member_info) = client.join_group(None, &welcome, None)?;
+
+        if group.current_epoch() > MAX_JOINED_EPOCH {
+            return Err(MlsError::InvalidMessage);
+        }
+
+        // Before the store is asked about the group: the id is the key of the
+        // stored group, and of the record of its deletion, which outlives it.
+        // Whoever wrote the Welcome chose it, and only its being derived from
+        // the group the host expects keeps them from giving a channel or a
+        // contact request the id of a group the API holds, or a Welcome to one
+        // group the id of another, or making it as large as they like.
+        group_id::check(
+            group.group_id(),
+            expected_group_uuid,
+            &new_member_info.group_info_extensions,
+        )?;
+
+        // Counted from the tree the Welcome carries, the only word there is on
+        // who is in the group, and its author's to write.
+        if group.roster().members_iter().count() > MAX_GROUP_MEMBERS {
+            return Err(MlsError::TooManyMembers);
+        }
+
+        if self.group_states.has_held(group.group_id())? {
+            return Err(MlsError::GroupAlreadyJoined);
+        }
+
+        // Whoever wrote the Welcome: mls-rs checked its GroupInfo against the
+        // signature key of this leaf, which the identity provider checked
+        // against the key pinned for them, if any.
+        let committer = group.roster().member_with_index(new_member_info.sender)?;
+        let committer_user_uuid = user_uuid_from(&committer.signing_identity.credential)?;
+
+        Ok(OpenedWelcome {
+            group,
+            committer_user_uuid,
+            welcome_payload: welcome_payload(&new_member_info.group_info_extensions),
+        })
+    }
+
     /// [`MlsClient::prune_key_packages`], deleting the key packages that
     /// expired before `expired_before`, in seconds since the Unix epoch, so a
     /// test can stand in for the months it takes.

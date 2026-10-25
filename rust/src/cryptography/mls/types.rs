@@ -19,29 +19,20 @@ pub struct InviteeKeyPackage {
     pub key_package: Vec<u8>,
 }
 
-/// A Welcome message addressed to exactly one invited member.
-///
-/// Maps directly onto the API's `InvitedGroupMember`.
-#[derive(uniffi::Record, Debug)]
-pub struct WelcomeForMember {
-    /// UUID of the member this Welcome is for.
-    pub user_uuid: String,
-    /// The serialised MLS Welcome message.
-    pub welcome: Vec<u8>,
-}
-
 /// The result of creating a group.
 #[derive(uniffi::Record, Debug)]
 pub struct GroupCreation {
     /// Identifier of the new MLS group.
     ///
-    /// MLS group ids are chosen by the creator, while the DuckCount API mints
-    /// its own group UUID only once the create request (Welcomes included)
-    /// has been accepted. The two therefore cannot be the same value, and the
-    /// host is responsible for recording the mapping between them.
+    /// It is not the DuckCount API's group UUID but derived from it, or from
+    /// a nonce this library draws for a group the API holds no UUID for, see
+    /// [`group_id`](crate::cryptography::mls::group_id). The host is
+    /// responsible for recording the mapping between them.
     pub mls_group_id: Vec<u8>,
-    /// One Welcome per invited member, ready for `POST /groups`.
-    pub welcomes: Vec<WelcomeForMember>,
+    /// The one Welcome every invitee joins from, ready for `POST /groups`,
+    /// which delivers it to each of them. It carries a secret for each
+    /// invitee's key package, and opens with no other.
+    pub welcome: Vec<u8>,
 }
 
 /// The result of adding members to an existing group.
@@ -50,8 +41,38 @@ pub struct AddMembersOutput {
     /// The Commit advancing the group's epoch, for every member that was
     /// already in the group.
     pub commit: Vec<u8>,
-    /// One Welcome per new member.
-    pub welcomes: Vec<WelcomeForMember>,
+    /// The one Welcome every new member joins from, as in
+    /// [`GroupCreation::welcome`].
+    pub welcome: Vec<u8>,
+}
+
+/// What a Welcome says, read without joining the group it is for, see
+/// [`MlsClient::inspect_welcome`].
+///
+/// [`MlsClient::inspect_welcome`]: crate::cryptography::mls::client::MlsClient::inspect_welcome
+#[derive(uniffi::Record, Debug)]
+pub struct WelcomeInspection {
+    /// UUID of the member whose Commit added this user, as the group's tree
+    /// names them: the one who wrote the Welcome and signed what it carries,
+    /// the payload included. For a group just created, its creator.
+    pub committer_user_uuid: String,
+    /// The UUIDs of every member other than this user, sorted, as the tree
+    /// the Welcome carries names them: who was in the group at the epoch the
+    /// Welcome opens, signed by its committer. Somebody who has left since,
+    /// with nobody committing their removal yet, is still among them.
+    pub member_uuids: Vec<String>,
+    /// What the committer handed the members the Welcome adds, see
+    /// [`MlsClient::create_group`], or `None` when they handed nothing.
+    ///
+    /// It is encrypted under a secret of the epoch the Welcome opens, so the
+    /// members it adds can read it, and so can those already in the group at
+    /// that epoch, who have the secret from the Commit: for a group just
+    /// created, only its creator. Nobody but the committer can have written
+    /// it, but it is their word like the rest of the Welcome: the host checks
+    /// it is what it expects.
+    ///
+    /// [`MlsClient::create_group`]: crate::cryptography::mls::client::MlsClient::create_group
+    pub welcome_payload: Option<Vec<u8>>,
 }
 
 /// Key packages ready to be published with `PUT /users/{uuid}/key-package`.

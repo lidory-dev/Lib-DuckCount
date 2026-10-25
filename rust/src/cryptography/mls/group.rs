@@ -34,15 +34,16 @@
 
 use std::sync::{Mutex, MutexGuard};
 
+use mls_rs::group::proposal::Proposal;
 use mls_rs::group::{ApplicationMessageDescription, CommitEffect, ContentType, ReceivedMessage};
 use mls_rs::{Group, MlsMessage, MlsMessageDescription, WireFormat};
 use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
-    MlsError,
+    MAX_GROUP_MEMBERS, MlsError,
     config::DuckCountMlsConfig,
     identity::{credential::user_uuid_from, fingerprint::fingerprint},
-    invitation::{match_welcomes, pin_invitees, validate_invitees},
+    invitation::{pin_invitees, shared_welcome, validate_invitees, welcome_payload_extensions},
     storage::identity_pin::IdentityPinStore,
     types::{
         AddMembersOutput, ApplicationMessage, InviteeKeyPackage, MemberInfo, ProcessedMessage,
@@ -184,42 +185,79 @@ impl MlsGroup {
 
     /// Adds members to the group.
     ///
-    /// Produces the Commit for the members already in the group and one Welcome
-    /// per new member, exactly the body of `POST /groups/{uuid}/members`. The
-    /// Commit stays pending until the server accepts it. Each new member's
-    /// signature key is pinned to them either way.
+    /// Produces the Commit for the members already in the group and the one
+    /// Welcome every new member joins from, exactly the body of
+    /// `POST /groups/{uuid}/members`. The Commit stays pending until the server
+    /// accepts it. Each new member's signature key is pinned to them either way.
     ///
     /// # Arguments
     ///
     /// * `invitees` - The user UUID and fetched key package of each new member.
+    /// * `welcome_payload` - What to hand the new members, if anything, as
+    ///   [`MlsClient::create_group`] does. The members already in the group
+    ///   can read it too.
+    ///
+    /// [`MlsClient::create_group`]: crate::cryptography::mls::client::MlsClient::create_group
     ///
     /// # Returns
     ///
-    /// * `Result<AddMembersOutput, MlsError>` - The Commit and the Welcomes.
+    /// * `Result<AddMembersOutput, MlsError>` - The Commit and the Welcome.
     ///
     /// # Errors
     ///
+    /// * `MlsError::TooManyMembers` - If the group would hold more than
+    ///   [`MAX_GROUP_MEMBERS`] members. Nothing is built.
+    /// * `MlsError::UnexpectedMembers` - If a member's proposal to add somebody
+    ///   is held for this epoch, which the Commit would add as well. Nothing is
+    ///   built.
     /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
     ///   group may store.
-    /// * `MlsError::InvalidKeyPackage` - If a key package is unusable.
-    /// * `MlsError::InvalidCredential` - If a key package asserts a different user
-    ///   than the one it was fetched for.
+    /// * `MlsError::UnusableKeyPackages` - Naming every invitee whose key
+    ///   package cannot be used, see
+    ///   [`validate_invitees`](crate::cryptography::mls::invitation::validate_invitees).
+    ///   Nothing is built.
     /// * `MlsError::IdentityKeyMismatch` - If an invitee's signature key differs
     ///   from the one pinned for them.
-    /// * `MlsError::UnmatchedWelcome` - If any invitee ends up without a Welcome.
+    /// * `MlsError::UnmatchedWelcome` - If an invitee has no secret in the Welcome.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
-    /// * `MlsError::ProtocolFailed` - If a Commit is already pending, or the
-    ///   Commit cannot be built.
+    /// * `MlsError::ProtocolFailed` - If `invitees` is empty (nothing is built),
+    ///   a Commit is already pending, or the Commit cannot be built.
     /// * `MlsError::StorageFailed` - If the pending state cannot be stored.
     pub fn add_members(
         &self,
         invitees: Vec<InviteeKeyPackage>,
+        welcome_payload: Option<Vec<u8>>,
     ) -> Result<AddMembersOutput, MlsError> {
-        let invitees = validate_invitees(invitees)?;
-
         let mut group = self.locked()?;
 
-        let mut commit_builder = group.commit_builder();
+        // Before anything is built: refused once built, the Commit would stay
+        // pending in memory, and stop this group making any other.
+        if invitees.is_empty() {
+            return Err(MlsError::ProtocolFailed(
+                "A commit adding nobody produces no Welcome.".to_string(),
+            ));
+        }
+
+        // mls-rs commits every proposal held for the epoch along with the
+        // invitees, and any member can have proposed adding somebody: the
+        // Commit would add them too, uncounted, and the Welcome open for them.
+        if group
+            .get_cached_proposals()
+            .iter()
+            .any(|cached| matches!(cached.proposal(), Proposal::Add(_)))
+        {
+            return Err(MlsError::UnexpectedMembers);
+        }
+
+        if group.roster().members_iter().count() + invitees.len() > MAX_GROUP_MEMBERS {
+            return Err(MlsError::TooManyMembers);
+        }
+
+        let invitees = validate_invitees(invitees)?;
+
+        let mut commit_builder = group
+            .commit_builder()
+            .set_group_info_ext(welcome_payload_extensions(welcome_payload));
 
         for invitee in &invitees {
             commit_builder = commit_builder.add_member(invitee.key_package.clone())?;
@@ -227,8 +265,8 @@ impl MlsGroup {
 
         let commit_output = commit_builder.build()?;
 
-        // Matched before anything is persisted, as in `MlsClient::create_group`.
-        let welcomes = match_welcomes(&commit_output.welcome_messages, &invitees)?;
+        // Checked before anything is persisted, as in `MlsClient::create_group`.
+        let welcome = shared_welcome(&commit_output.welcome_messages, &invitees)?;
 
         pin_invitees(&self.pins, &invitees)?;
 
@@ -236,7 +274,7 @@ impl MlsGroup {
 
         Ok(AddMembersOutput {
             commit: commit_output.commit_message.to_bytes()?,
-            welcomes,
+            welcome,
         })
     }
 
@@ -683,6 +721,30 @@ impl MlsGroup {
 }
 
 /// The members of `group` other than this user, with their signature keys,
+/// sorted by user UUID.
+///
+/// # Errors
+///
+/// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+pub(crate) fn peers(
+    group: &Group<DuckCountMlsConfig>,
+) -> Result<Vec<(String, SignaturePublicKey)>, MlsError> {
+    let mut peers = Vec::new();
+
+    for member in group.roster().members() {
+        if member.index != group.current_member_index() {
+            let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+
+            peers.push((user_uuid, member.signing_identity.signature_key));
+        }
+    }
+
+    peers.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+
+    Ok(peers)
+}
+
+/// The members of `group` other than this user, with their signature keys,
 /// provided they are exactly `expected_members`.
 ///
 /// Comparing sorted lists is exact because mls-rs refuses a tree in which two
@@ -696,25 +758,15 @@ pub(crate) fn expected_peers(
     group: &Group<DuckCountMlsConfig>,
     mut expected_members: Vec<String>,
 ) -> Result<Vec<(String, SignaturePublicKey)>, MlsError> {
-    let mut peers = Vec::new();
+    let peers = peers(group)?;
 
-    for member in group.roster().members() {
-        if member.index != group.current_member_index() {
-            let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
-
-            peers.push((user_uuid, member.signing_identity.signature_key));
-        }
-    }
-
-    let mut peer_uuids = peers
-        .iter()
-        .map(|(user_uuid, _)| user_uuid.clone())
-        .collect::<Vec<_>>();
-
-    peer_uuids.sort_unstable();
     expected_members.sort_unstable();
 
-    if peer_uuids != expected_members {
+    if !peers
+        .iter()
+        .map(|(user_uuid, _)| user_uuid)
+        .eq(&expected_members)
+    {
         return Err(MlsError::UnexpectedMembers);
     }
 

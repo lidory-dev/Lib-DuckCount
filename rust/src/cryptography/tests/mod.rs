@@ -1,6 +1,7 @@
 mod authentication;
 mod encryption;
 mod fingerprint;
+mod group_uuid;
 mod keys;
 mod mls;
 mod one_time_expense;
