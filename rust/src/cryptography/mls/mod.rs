@@ -49,9 +49,10 @@ pub const CIPHER_SUITE: CipherSuite = CipherSuite::ML_KEM_768_X25519;
 ///
 /// Every member stores the whole ratchet tree, and the Welcome adding anybody
 /// carries it, so both grow with the group: a group of a hundred is created
-/// and joined in some 300 KB of state, within the most a group may store (see
-/// `MAX_GROUP_STATE_LEN` in `storage/group_state.rs`), and its one Welcome is
-/// about as large. The DuckCount API refuses a larger group too, and the two
+/// and joined in some 300 KB of state, to which a pending Commit adds up to
+/// some 830 KB, both within the most a group of a hundred may store (see
+/// `max_group_state_len_at_rest` and `max_group_state_len` in
+/// `storage/group_state.rs`), and its one Welcome is about 300 KB. The DuckCount API refuses a larger group too, and the two
 /// change together; a Welcome for one is refused on joining, whoever wrote it.
 pub const MAX_GROUP_MEMBERS: usize = 100;
 
@@ -98,10 +99,10 @@ pub enum MlsError {
     UnmatchedWelcome(String),
     /// No group with the given MLS group id is stored locally.
     GroupNotFound,
-    /// A Welcome is for a group this device has already joined, whether it
-    /// still holds it or deleted it since, until pruning forgets the deletion.
-    /// Joining it again would put that group back at the epoch the Welcome was
-    /// for.
+    /// A Welcome is for a group this device holds, or for one it deleted at
+    /// the epoch the Welcome is for or a later one, until pruning forgets the
+    /// deletion. Joining it would put that group back at an epoch this device
+    /// held already.
     GroupAlreadyJoined,
     /// A Welcome is for a group whose id is not the one derived for the group
     /// the host expects it to be, see [`group_id`]: whoever wrote it gave it
@@ -120,11 +121,26 @@ pub enum MlsError {
     /// An MLS message could not be decoded, or describes a group no client of
     /// this library produces.
     InvalidMessage,
+    /// A message would change a group in a way the host does not allow: a
+    /// Commit from a member other than the one allowed to commit, refused
+    /// before anything it carries is checked, or a Proposal, which no member
+    /// may send where one is, see
+    /// [`process_incoming_message`](group::MlsGroup::process_incoming_message).
+    /// Nothing was stored, and the group is as it was.
+    UnauthorizedChange,
     /// Storing a group would grow its state, or the record of an epoch it
-    /// retains, past the most a group may store, see `MAX_GROUP_STATE_LEN` in
-    /// `storage/group_state.rs`. Nothing was stored. A message refused this way
-    /// leaves the group as it was; after any other operation, the group in
-    /// memory may still hold the refused change, and has to be loaded again.
+    /// retains, past the most a group of its members may store, see
+    /// `max_group_state_len_at_rest` in `storage/group_state.rs`. Nothing was
+    /// stored. A message refused this way leaves the group as it was; after
+    /// any other operation, the group in memory may still hold the refused
+    /// change, and has to be loaded again.
+    ///
+    /// At rest, a message refused stays refused, and so does every later one
+    /// its sender sent in that epoch, see `MAX_GROUP_STATE_LEN`. While a
+    /// Commit of this user's is pending, though, the refusal can be for the
+    /// room the Commit takes, as a large one leaves no room to read or send
+    /// anything beside it: the message is then read, or sent, once the Commit
+    /// is applied or discarded, and has to be kept until then.
     GroupStateTooLarge,
     /// A lock guarding MLS state was poisoned by a panic in another thread.
     LockPoisoned,
@@ -178,6 +194,12 @@ impl Display for MlsError {
                 write!(f, "User {} is not a member of this group.", user_uuid)
             }
             MlsError::InvalidMessage => write!(f, "Invalid MLS message."),
+            MlsError::UnauthorizedChange => {
+                write!(
+                    f,
+                    "The MLS message changes the group in a way that is not allowed."
+                )
+            }
             MlsError::GroupStateTooLarge => {
                 write!(f, "The MLS group state would grow too large to store.")
             }
@@ -196,13 +218,15 @@ impl IntoAnyError for MlsError {
 
 impl From<mls_rs::error::MlsError> for MlsError {
     fn from(error: mls_rs::error::MlsError) -> Self {
-        // Our identity provider and storage adapters fail with our own errors,
-        // which mls-rs wraps before they reach the caller. Unwrap them so the
-        // host still sees the actionable variant, a pin mismatch or a storage
-        // failure worth retrying, rather than an opaque protocol failure.
+        // Our identity provider, storage adapters and rules fail with our own
+        // errors, which mls-rs wraps before they reach the caller. Unwrap them
+        // so the host still sees the actionable variant, a pin mismatch, a
+        // storage failure worth retrying or a change it does not allow, rather
+        // than an opaque protocol failure.
         if let mls_rs::error::MlsError::IdentityProviderError(any_error)
         | mls_rs::error::MlsError::GroupStorageError(any_error)
-        | mls_rs::error::MlsError::KeyPackageRepoError(any_error) = &error
+        | mls_rs::error::MlsError::KeyPackageRepoError(any_error)
+        | mls_rs::error::MlsError::MlsRulesError(any_error) = &error
             && let Some(ours) = any_error.inner_dyn_error().downcast_ref::<MlsError>()
         {
             return ours.clone();

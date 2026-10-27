@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
 
     use mls_rs::client_builder::MlsConfig;
@@ -9,13 +10,16 @@ mod tests {
     use mls_rs::group::ContentType;
     use mls_rs::identity::SigningIdentity;
     use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
+    use mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage;
     use mls_rs::time::MlsTime;
     use mls_rs::{
-        CipherSuite, CipherSuiteProvider, Client, CryptoProvider, Extension, ExtensionList,
+        CipherSuite, CipherSuiteProvider, Client, CryptoProvider, Extension, ExtensionList, Group,
         MlsMessage,
     };
+    use mls_rs_core::group::{EpochRecord, GroupState, GroupStateStorage};
     use mls_rs_crypto_awslc::AwsLcCryptoProvider;
     use uuid::Uuid;
+    use zeroize::Zeroizing;
 
     use crate::cryptography::mls::client::MlsClient;
     use crate::cryptography::mls::config::{KEY_PACKAGE_LIFETIME, mls_rules};
@@ -26,6 +30,10 @@ mod tests {
     use crate::cryptography::mls::identity::fingerprint::safety_number;
     use crate::cryptography::mls::one_time_expense::{
         OneTimeExpenseManifest, SealedValue, verify_one_time_expense,
+    };
+    use crate::cryptography::mls::storage::group_state::{
+        max_group_state_len, max_group_state_len_at_rest, max_group_state_len_at_rest_in_tests,
+        max_group_state_len_in_tests, with_limits_outside_tests,
     };
     use crate::cryptography::mls::storage::{MlsNamespace, MlsStore, MlsStoreError};
     use crate::cryptography::mls::types::{InviteeKeyPackage, ProcessedMessage};
@@ -232,6 +240,19 @@ mod tests {
         uuids
     }
 
+    /// How large the state `user` stores for the group `group_id` is, before
+    /// sealing.
+    fn stored_state_len(user: &TestUser, group_id: &[u8]) -> usize {
+        let sealed = user
+            .store
+            .get(MlsNamespace::GroupState, group_id.to_vec())
+            .unwrap()
+            .unwrap();
+
+        // Sealing adds a 12-byte nonce and a 16-byte tag.
+        sealed.len() - 12 - 16
+    }
+
     #[test]
     fn test_create_join_and_exchange_application_messages() {
         let alice = TestUser::new();
@@ -259,7 +280,10 @@ mod tests {
             .unwrap();
 
         for group in [bob_group, carol_group] {
-            match group.process_incoming_message(ciphertext.clone()).unwrap() {
+            match group
+                .process_incoming_message(ciphertext.clone(), None)
+                .unwrap()
+            {
                 ProcessedMessage::ApplicationMessage {
                     sender_user_uuid,
                     payload,
@@ -306,7 +330,9 @@ mod tests {
         assert_eq!(alice_group.epoch().unwrap(), epoch_before);
 
         assert!(matches!(
-            bob_group.process_incoming_message(output.commit).unwrap(),
+            bob_group
+                .process_incoming_message(output.commit, None)
+                .unwrap(),
             ProcessedMessage::Commit {
                 removed_self: false,
                 ..
@@ -356,7 +382,7 @@ mod tests {
         // how their client learns they are out.
         assert!(matches!(
             carol_group
-                .process_incoming_message(commit.clone())
+                .process_incoming_message(commit.clone(), None)
                 .unwrap(),
             ProcessedMessage::Commit {
                 removed_self: true,
@@ -365,7 +391,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            bob_group.process_incoming_message(commit).unwrap(),
+            bob_group.process_incoming_message(commit, None).unwrap(),
             ProcessedMessage::Commit {
                 removed_self: false,
                 ..
@@ -387,10 +413,303 @@ mod tests {
 
         assert!(
             bob_group
-                .process_incoming_message(ciphertext.clone())
+                .process_incoming_message(ciphertext.clone(), None)
                 .is_ok()
         );
-        assert!(carol_group.process_incoming_message(ciphertext).is_err());
+        assert!(
+            carol_group
+                .process_incoming_message(ciphertext, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_a_commit_names_its_committer_and_the_epoch_each_member_is_in() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let epoch_before = alice_group.epoch().unwrap();
+
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        // Bob moves on to the next epoch, and Carol, removed, stays in the one
+        // she was in.
+        for (group, epoch, removed) in [
+            (bob_group, epoch_before + 1, false),
+            (carol_group, epoch_before, true),
+        ] {
+            match group
+                .process_incoming_message(removal.clone(), None)
+                .unwrap()
+            {
+                ProcessedMessage::Commit {
+                    committer_user_uuid,
+                    epoch: epoch_now,
+                    removed_self,
+                } => {
+                    assert_eq!(committer_user_uuid, Some(alice.uuid.clone()));
+                    assert_eq!(epoch_now, epoch);
+                    assert_eq!(group.epoch().unwrap(), epoch);
+                    assert_eq!(removed_self, removed);
+                }
+                other => panic!("expected a commit, got {:?}", other_kind(&other)),
+            }
+        }
+    }
+
+    #[test]
+    fn test_removing_nobody_is_refused_before_anything_is_built() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+        let before = alice.store.records();
+
+        let error = groups[0]
+            .remove_members(Vec::new())
+            .expect_err("removing nobody must be refused");
+
+        assert!(matches!(error, MlsError::ProtocolFailed(_)));
+
+        // Nothing was stored, nor built: the group still commits.
+        assert_eq!(alice.store.records(), before);
+        assert!(!groups[0].has_pending_commit().unwrap());
+
+        groups[0].update().unwrap();
+    }
+
+    #[test]
+    fn test_members_allowing_only_the_creator_to_commit_follow_its_removals_and_additions() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let creator = Some(alice.uuid.clone());
+
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        for (group, removed) in [(carol_group, true), (bob_group, false)] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(removal.clone(), creator.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit { removed_self, .. } if removed_self == removed
+            ));
+        }
+
+        accept(alice_group);
+
+        let addition = alice_group
+            .add_members(vec![dave.invitation()], None)
+            .unwrap();
+
+        assert!(matches!(
+            bob_group
+                .process_incoming_message(addition.commit, creator.clone())
+                .unwrap(),
+            ProcessedMessage::Commit {
+                removed_self: false,
+                ..
+            }
+        ));
+
+        accept(alice_group);
+
+        let dave_group_id = dave
+            .client
+            .join_group(
+                addition.welcome,
+                Some(group_uuid),
+                uuids(&[&alice, &bob]),
+                true,
+            )
+            .unwrap();
+        let dave_group = dave.client.load_group(dave_group_id).unwrap();
+
+        let mut expected = uuids(&[&alice, &bob, &dave]);
+        expected.sort();
+
+        assert_eq!(member_uuids(alice_group), expected);
+        assert_eq!(member_uuids(bob_group), expected);
+        assert_eq!(member_uuids(&dave_group), expected);
+
+        // Whoever sends to the group, it is read as before.
+        let message = dave_group
+            .encrypt_application_message(b"hello".to_vec())
+            .unwrap();
+
+        for group in [alice_group, bob_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(message.clone(), creator.clone())
+                    .unwrap(),
+                ProcessedMessage::ApplicationMessage { sender_user_uuid, .. }
+                    if sender_user_uuid == dave.uuid
+            ));
+        }
+    }
+
+    #[test]
+    fn test_a_commit_from_anybody_but_the_allowed_committer_is_refused_and_nothing_stored() {
+        // Bob, a member, commits a stranger in, while Alice, the creator, has
+        // his removal pending.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let creator = Some(alice.uuid.clone());
+        let epoch = alice_group.epoch().unwrap();
+
+        let intrusion = bob_group
+            .add_members(stranger_invitations(1), None)
+            .unwrap()
+            .commit;
+
+        let removal = alice_group.remove_members(vec![bob.uuid.clone()]).unwrap();
+
+        for (user, group) in [(&alice, alice_group), (&carol, carol_group)] {
+            let before = user.store.records();
+
+            let error = group
+                .process_incoming_message(intrusion.clone(), creator.clone())
+                .expect_err("a Commit from anybody but the creator must be refused");
+
+            assert!(matches!(error, MlsError::UnauthorizedChange));
+
+            // Nothing was stored, nor kept in memory.
+            assert_eq!(user.store.records(), before);
+            assert_eq!(group.epoch().unwrap(), epoch);
+            assert_eq!(group.members().unwrap().len(), 3);
+        }
+
+        // Alice's removal is still pending, as it would not be had Bob's Commit
+        // been applied, and it is the one Carol follows.
+        assert!(alice_group.has_pending_commit().unwrap());
+
+        assert!(matches!(
+            carol_group
+                .process_incoming_message(removal, creator)
+                .unwrap(),
+            ProcessedMessage::Commit { .. }
+        ));
+
+        accept(alice_group);
+
+        let mut expected = uuids(&[&alice, &carol]);
+        expected.sort();
+
+        assert_eq!(member_uuids(alice_group), expected);
+        assert_eq!(member_uuids(carol_group), expected);
+    }
+
+    #[test]
+    fn test_a_proposal_is_refused_from_any_member_where_one_member_is_allowed_to_commit() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let creator = Some(alice.uuid.clone());
+
+        // Carol, leaving, proposes her own removal, which the creator refuses
+        // like everybody else.
+        let leaving = carol_group.propose_self_remove().unwrap();
+
+        assert!(matches!(
+            alice_group
+                .process_incoming_message(leaving.clone(), creator.clone())
+                .unwrap_err(),
+            MlsError::UnauthorizedChange
+        ));
+
+        // A proposal of the creator's own goes the same way.
+        let creators = alice_group.propose_self_remove().unwrap();
+
+        let before = bob.store.records();
+
+        for proposal in [leaving, creators] {
+            assert!(matches!(
+                bob_group
+                    .process_incoming_message(proposal, creator.clone())
+                    .unwrap_err(),
+                MlsError::UnauthorizedChange
+            ));
+        }
+
+        // Nothing was stored, nor kept: Bob still sends, which a proposal kept
+        // would stop until somebody committed it.
+        assert_eq!(bob.store.records(), before);
+
+        bob_group
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+    }
+
+    #[test]
+    fn test_a_commit_from_anybody_but_the_allowed_committer_is_refused_before_what_it_carries_is_checked()
+     {
+        // Bob, a member, commits Dave in under a key of his own making. Alice,
+        // the creator, has Dave's real key pinned, Carol none.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        establish_group(&alice, &[&dave]);
+
+        let groups = establish_group(&alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let forged_dave = InviteeKeyPackage {
+            user_uuid: dave.uuid.clone(),
+            key_package: plain_client(dave.uuid.clone())
+                .generate_key_package_message(
+                    ExtensionList::default(),
+                    ExtensionList::default(),
+                    None,
+                )
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+        };
+
+        let intrusion = bob_group
+            .add_members(vec![forged_dave], None)
+            .unwrap()
+            .commit;
+
+        // Both refuse it for who committed it, Alice without telling of a key
+        // Dave never changed.
+        for (user, group) in [(&alice, alice_group), (&carol, carol_group)] {
+            let before = user.store.records();
+
+            assert!(matches!(
+                group
+                    .process_incoming_message(intrusion.clone(), Some(alice.uuid.clone()))
+                    .unwrap_err(),
+                MlsError::UnauthorizedChange
+            ));
+
+            assert_eq!(user.store.records(), before);
+        }
     }
 
     #[test]
@@ -553,7 +872,9 @@ mod tests {
             .add_members(vec![carol.invitation()], Some(b"for carol".to_vec()))
             .unwrap();
 
-        alice_group.process_incoming_message(output.commit).unwrap();
+        alice_group
+            .process_incoming_message(output.commit, None)
+            .unwrap();
         accept(&bob_group);
 
         let inspection = carol
@@ -736,7 +1057,7 @@ mod tests {
             .unwrap();
 
         victor_group
-            .process_incoming_message(output.commit)
+            .process_incoming_message(output.commit, None)
             .unwrap();
         accept(mallory_group);
 
@@ -782,7 +1103,7 @@ mod tests {
             .unwrap();
 
         victor_group
-            .process_incoming_message(output.commit)
+            .process_incoming_message(output.commit, None)
             .unwrap();
 
         assert!(matches!(
@@ -863,7 +1184,7 @@ mod tests {
         assert_eq!(member_uuids(&reloaded), expected);
 
         assert!(matches!(
-            reloaded.process_incoming_message(commit).unwrap(),
+            reloaded.process_incoming_message(commit, None).unwrap(),
             ProcessedMessage::Commit { .. }
         ));
     }
@@ -889,7 +1210,7 @@ mod tests {
             .unwrap();
 
         // Kept, the same Proposal would stop him until somebody committed it.
-        bob_group.process_incoming_message(proposal).unwrap();
+        bob_group.process_incoming_message(proposal, None).unwrap();
 
         assert!(
             bob_group
@@ -961,6 +1282,116 @@ mod tests {
             .unwrap();
 
         mallory_group.read_application_message(message).unwrap();
+    }
+
+    /// The last of `count` application messages `sender` encrypts, which
+    /// overtakes all the others: read, it leaves its reader a key for each.
+    fn last_of_messages(sender: &MlsGroup, count: usize) -> Vec<u8> {
+        let mut last = Vec::new();
+
+        for _ in 0..count {
+            last = sender
+                .encrypt_application_message(b"skipped".to_vec())
+                .unwrap();
+        }
+
+        last
+    }
+
+    #[test]
+    fn test_a_group_holding_a_pending_commit_may_store_no_more_than_at_rest() {
+        // Victor has an update pending as Mallory's skipping messages come in:
+        // what he stores meanwhile, the update included, is held to what the
+        // group may store at rest, the room kept for a Commit being his
+        // update's.
+        let mallory = TestUser::new();
+        let victor = TestUser::new();
+
+        let (mallory_group, victor_group) = open_request(&mallory, &victor);
+        let group_id = victor_group.mls_group_id().unwrap();
+
+        victor_group.update().unwrap();
+
+        let mut refusal = None;
+
+        // A hundred at a time, some 3 KB of keys each, so that what he stores
+        // comes as close as it may to what he may store.
+        for _ in 0..40 {
+            let last = last_of_messages(&mallory_group, 100);
+            let before = stored_state_len(&victor, &group_id);
+
+            if let Err(error) = victor_group.read_application_message(last) {
+                refusal = Some((error, before));
+                break;
+            }
+        }
+
+        let (error, before) = refusal.expect("the group must stop growing");
+
+        assert!(matches!(error, MlsError::GroupStateTooLarge));
+
+        // Everything stored up to the refusal, its update pending, was within
+        // what a group of two may store at rest.
+        assert!(before <= max_group_state_len_at_rest_in_tests(2));
+        assert!(victor_group.has_pending_commit().unwrap());
+    }
+
+    #[test]
+    fn test_a_message_refused_beside_a_pending_addition_is_read_once_it_is_applied_or_discarded() {
+        // Alice and Bob add eight: the addition pending, the group of two they
+        // are has no room left to read or send anything beside it.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+        let (alice_group, bob_group) = (&groups[0], &groups[1]);
+        let creator = Some(alice.uuid.clone());
+
+        for discarded in [true, false] {
+            let message = bob_group
+                .encrypt_application_message(b"hello".to_vec())
+                .unwrap();
+
+            alice_group
+                .add_members(stranger_invitations(8), None)
+                .unwrap();
+
+            let before = alice.store.records();
+
+            assert!(matches!(
+                alice_group
+                    .process_incoming_message(message.clone(), creator.clone())
+                    .unwrap_err(),
+                MlsError::GroupStateTooLarge
+            ));
+            assert!(matches!(
+                alice_group
+                    .encrypt_application_message(b"hello".to_vec())
+                    .unwrap_err(),
+                MlsError::GroupStateTooLarge
+            ));
+
+            assert_eq!(alice.store.records(), before);
+
+            // Read once the addition is discarded, or applied, in the epoch
+            // it ends.
+            if discarded {
+                alice_group.clear_pending_commit().unwrap();
+            } else {
+                accept(alice_group);
+            }
+
+            assert!(matches!(
+                alice_group
+                    .process_incoming_message(message, creator.clone())
+                    .unwrap(),
+                ProcessedMessage::ApplicationMessage { .. }
+            ));
+
+            alice_group
+                .encrypt_application_message(b"hello".to_vec())
+                .unwrap();
+        }
     }
 
     /// `message`, a PrivateMessage sent to the group `group_id`, with the
@@ -1192,7 +1623,7 @@ mod tests {
             .unwrap();
 
         let error = groups[1]
-            .process_incoming_message(proposal.to_bytes().unwrap())
+            .process_incoming_message(proposal.to_bytes().unwrap(), None)
             .expect_err("a message sent in the clear must be refused");
 
         assert!(matches!(error, MlsError::InvalidMessage));
@@ -1208,7 +1639,7 @@ mod tests {
             .encrypt_application_message(b"still here".to_vec())
             .unwrap();
 
-        groups[0].process_incoming_message(message).unwrap();
+        groups[0].process_incoming_message(message, None).unwrap();
     }
 
     /// A Welcome for `joiner` into the group `group_id`, its GroupInfo carrying
@@ -1447,11 +1878,20 @@ mod tests {
     /// by design, which a test that needs a hundred members cannot afford a
     /// hundred times.
     fn plain_client(user_uuid: String) -> Client<impl MlsConfig> {
+        plain_client_storing_in(user_uuid, InMemoryGroupStateStorage::new())
+    }
+
+    /// [`plain_client`], storing its groups in `group_states`.
+    fn plain_client_storing_in(
+        user_uuid: String,
+        group_states: impl GroupStateStorage + Clone + 'static,
+    ) -> Client<impl MlsConfig> {
         let crypto_provider = crate::cryptography::mls::config::crypto_provider();
         let cipher_suite_provider = crypto_provider.cipher_suite_provider(CIPHER_SUITE).unwrap();
         let (secret, public) = cipher_suite_provider.signature_key_generate().unwrap();
 
         Client::builder()
+            .group_state_storage(group_states)
             .identity_provider(BasicIdentityProvider)
             .crypto_provider(crypto_provider)
             .mls_rules(mls_rules())
@@ -1573,8 +2013,8 @@ mod tests {
         ));
 
         // One fewer makes exactly the cap, which is built, and stopped only
-        // when stored: a test lets a group store 64 KB, a fifth of what a
-        // hundred members take.
+        // when stored: a test lets a group of a hundred store some 260 KB,
+        // short of the 300 KB they take.
         assert!(matches!(
             alice
                 .client
@@ -1626,14 +2066,12 @@ mod tests {
         assert!(!groups[0].has_pending_commit().unwrap());
 
         // Nor built: a Commit left pending in memory would refuse the next one
-        // outright. Up to exactly the cap, it is built, and stopped only when
-        // stored, as a test lets a group store 64 KB.
-        assert!(matches!(
-            groups[0]
-                .add_members(stranger_invitations(MAX_GROUP_MEMBERS - 2), None)
-                .unwrap_err(),
-            MlsError::GroupStateTooLarge
-        ));
+        // outright. Up to exactly the cap, it is built and stored.
+        groups[0]
+            .add_members(stranger_invitations(MAX_GROUP_MEMBERS - 2), None)
+            .unwrap();
+
+        assert!(groups[0].has_pending_commit().unwrap());
     }
 
     #[test]
@@ -1700,7 +2138,7 @@ mod tests {
 
         assert!(matches!(
             alice_group
-                .process_incoming_message(proposal.to_bytes().unwrap())
+                .process_incoming_message(proposal.to_bytes().unwrap(), None)
                 .unwrap(),
             ProcessedMessage::Proposal { .. }
         ));
@@ -1737,7 +2175,7 @@ mod tests {
         assert_eq!(bob.store.records(), before);
 
         // A group of exactly the cap is let in, and stopped only when stored,
-        // as a test lets a group store 64 KB.
+        // as a test lets a group of a hundred store some 260 KB.
         let (welcome, group_uuid, others) = welcome_to_a_group_of(MAX_GROUP_MEMBERS, &bob);
 
         assert!(matches!(
@@ -1746,6 +2184,539 @@ mod tests {
                 .unwrap_err(),
             MlsError::GroupStateTooLarge
         ));
+    }
+
+    #[test]
+    fn test_a_group_may_store_more_for_each_member_past_two_up_to_the_cap() {
+        // A group of two, as a direct channel or a contact request is, may
+        // store what it always could, and so may one left with a single member.
+        assert_eq!(max_group_state_len(2), 512 * 1024);
+        assert_eq!(max_group_state_len(1), 512 * 1024);
+
+        assert_eq!(max_group_state_len(3), (512 + 12) * 1024);
+        assert_eq!(max_group_state_len(MAX_GROUP_MEMBERS), 1_728_512);
+
+        // A group somebody committed past the cap may store no more.
+        assert_eq!(max_group_state_len(MAX_GROUP_MEMBERS + 1), 1_728_512);
+
+        // At rest, less the room kept for the Commit it builds next.
+        assert_eq!(max_group_state_len_at_rest(2), (512 - 27) * 1024);
+        assert_eq!(max_group_state_len_at_rest(1), (512 - 27) * 1024);
+
+        assert_eq!(max_group_state_len_at_rest(3), (512 + 12 - 36) * 1024);
+        assert_eq!(max_group_state_len_at_rest(MAX_GROUP_MEMBERS), 797_696);
+        assert_eq!(max_group_state_len_at_rest(MAX_GROUP_MEMBERS + 1), 797_696);
+    }
+
+    /// A [`GroupStateStorage`] keeping nothing, but how large the largest
+    /// record it was handed is: what a group stores, measured past what a test
+    /// lets it store.
+    #[derive(Clone, Default)]
+    struct LargestRecord(Arc<Mutex<usize>>);
+
+    impl LargestRecord {
+        /// How large the largest record handed over since the last call is.
+        fn take(&self) -> usize {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    impl GroupStateStorage for LargestRecord {
+        type Error = Infallible;
+
+        fn state(&self, _group_id: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>, Infallible> {
+            Ok(None)
+        }
+
+        fn epoch(
+            &self,
+            _group_id: &[u8],
+            _epoch_id: u64,
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, Infallible> {
+            Ok(None)
+        }
+
+        fn write(
+            &mut self,
+            state: GroupState,
+            epoch_inserts: Vec<EpochRecord>,
+            epoch_updates: Vec<EpochRecord>,
+        ) -> Result<(), Infallible> {
+            let largest = epoch_inserts
+                .iter()
+                .chain(&epoch_updates)
+                .map(|epoch| epoch.data.len())
+                .fold(state.data.len(), usize::max);
+
+            let mut recorded = self.0.lock().unwrap();
+            *recorded = (*recorded).max(largest);
+
+            Ok(())
+        }
+
+        fn max_epoch_id(&self, _group_id: &[u8]) -> Result<Option<u64>, Infallible> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn test_a_group_of_a_hundred_may_hold_a_pending_addition_or_removal() {
+        // Measured on a plain mls-rs creator running the rules of this library,
+        // as a test lets a group of a hundred store less than it takes: how
+        // much a pending Commit adds to the group at rest, which a group stored
+        // at rest as full as it may be has to have room for.
+        let largest = LargestRecord::default();
+        let creator = plain_client_storing_in(Uuid::new_v4().to_string(), largest.clone());
+
+        let mut group = creator
+            .create_group_with_id(
+                server_group_id(&new_group_uuid()),
+                ExtensionList::default(),
+                ExtensionList::default(),
+                None,
+            )
+            .unwrap();
+
+        // Ninety-nine members, the creator included.
+        let mut commit_builder = group.commit_builder();
+
+        for invitation in stranger_invitations(MAX_GROUP_MEMBERS - 2) {
+            commit_builder = commit_builder
+                .add_member(MlsMessage::from_bytes(&invitation.key_package).unwrap())
+                .unwrap();
+        }
+
+        commit_builder.build().unwrap();
+        group.apply_pending_commit().unwrap();
+        group.write_to_storage().unwrap();
+
+        let at_rest_of_ninety_nine = largest.take();
+
+        // A hundredth pending.
+        let hundredth = stranger_invitations(1).remove(0);
+
+        group
+            .commit_builder()
+            .add_member(MlsMessage::from_bytes(&hundredth.key_package).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        group.write_to_storage().unwrap();
+
+        let pending_addition = largest.take();
+
+        group.apply_pending_commit().unwrap();
+        group.write_to_storage().unwrap();
+
+        let at_rest_of_a_hundred = largest.take();
+
+        assert!(at_rest_of_a_hundred <= max_group_state_len_at_rest(MAX_GROUP_MEMBERS));
+
+        // Then their removal.
+        let hundredth_index = group
+            .member_with_identity(hundredth.user_uuid.as_bytes())
+            .unwrap()
+            .index;
+
+        group
+            .commit_builder()
+            .remove_member(hundredth_index)
+            .unwrap()
+            .build()
+            .unwrap();
+        group.write_to_storage().unwrap();
+
+        let pending_removal = largest.take();
+
+        for (at_rest, pending, at_rest_before) in [
+            (
+                at_rest_of_ninety_nine,
+                pending_addition,
+                MAX_GROUP_MEMBERS - 1,
+            ),
+            (at_rest_of_a_hundred, pending_removal, MAX_GROUP_MEMBERS),
+        ] {
+            // Past what a group of two may store.
+            assert!(pending > max_group_state_len(2));
+
+            // Within what a hundred may, from a group as full at rest as it
+            // may be.
+            assert!(
+                max_group_state_len_at_rest(at_rest_before) + (pending - at_rest)
+                    <= max_group_state_len(MAX_GROUP_MEMBERS)
+            );
+        }
+    }
+
+    /// Creates a group of `alice`, `bob`, and `stranger_count` members
+    /// nobody has met, who never join, and joins Bob to it.
+    ///
+    /// Returns Alice's group and Bob's.
+    fn establish_group_with_strangers(
+        alice: &TestUser,
+        bob: &TestUser,
+        stranger_count: usize,
+    ) -> (Arc<MlsGroup>, Arc<MlsGroup>) {
+        let group_uuid = new_group_uuid();
+        let strangers = stranger_invitations(stranger_count);
+
+        let others = std::iter::once(alice.uuid.clone())
+            .chain(strangers.iter().map(|stranger| stranger.user_uuid.clone()))
+            .collect();
+
+        let creation = alice
+            .client
+            .create_group(
+                Some(group_uuid.clone()),
+                strangers.into_iter().chain([bob.invitation()]).collect(),
+                None,
+            )
+            .unwrap();
+
+        let joined = bob
+            .client
+            .join_group(creation.welcome, Some(group_uuid), others, true)
+            .unwrap();
+
+        (
+            alice.client.load_group(creation.mls_group_id).unwrap(),
+            bob.client.load_group(joined).unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_creating_and_joining_a_group_may_store_what_its_members_may() {
+        // Twenty-two members store past what a group of two may.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (alice_group, bob_group) = establish_group_with_strangers(&alice, &bob, 20);
+
+        for (user, group) in [(&alice, &alice_group), (&bob, &bob_group)] {
+            let stored = stored_state_len(user, &group.mls_group_id().unwrap());
+
+            assert!(stored > max_group_state_len_at_rest_in_tests(2));
+            assert!(stored <= max_group_state_len_at_rest_in_tests(22));
+        }
+    }
+
+    #[test]
+    fn test_an_addition_is_stored_as_the_group_it_makes_pending_and_applied() {
+        // Alice and Bob add twenty, which a group of two could not store,
+        // pending or at rest.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+        let group_id = groups[0].mls_group_id().unwrap();
+
+        let addition = groups[0]
+            .add_members(stranger_invitations(20), None)
+            .unwrap();
+
+        let pending = stored_state_len(&alice, &group_id);
+
+        assert!(pending > max_group_state_len_in_tests(2));
+        assert!(pending <= max_group_state_len_in_tests(22));
+
+        // Applied by Alice, and by Bob as he reads it.
+        accept(&groups[0]);
+
+        groups[1]
+            .process_incoming_message(addition.commit, Some(alice.uuid.clone()))
+            .unwrap();
+
+        for user in [&alice, &bob] {
+            let stored = stored_state_len(user, &group_id);
+
+            assert!(stored > max_group_state_len_at_rest_in_tests(2));
+            assert!(stored <= max_group_state_len_at_rest_in_tests(22));
+        }
+    }
+
+    #[test]
+    fn test_a_pending_removal_is_stored_as_the_group_it_removes_members_from() {
+        // Alice removes twenty of twenty-two, which the group of two it leaves
+        // could not store pending.
+        let alice = TestUser::new();
+        let strangers = stranger_invitations(21);
+        let removed = strangers[..20]
+            .iter()
+            .map(|stranger| stranger.user_uuid.clone())
+            .collect();
+
+        let creation = alice
+            .client
+            .create_group(Some(new_group_uuid()), strangers, None)
+            .unwrap();
+
+        alice
+            .client
+            .load_group(creation.mls_group_id.clone())
+            .unwrap()
+            .remove_members(removed)
+            .unwrap();
+
+        let stored = stored_state_len(&alice, &creation.mls_group_id);
+
+        assert!(stored > max_group_state_len_in_tests(2));
+        assert!(stored <= max_group_state_len_in_tests(22));
+    }
+
+    #[test]
+    fn test_a_message_read_may_grow_a_group_to_what_its_members_may_store() {
+        // Bob, in a group of ten, reads the last of a thousand messages from
+        // Alice, keeping a key for each of the others, which it overtook.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let (alice_group, bob_group) = establish_group_with_strangers(&alice, &bob, 8);
+
+        bob_group
+            .process_incoming_message(
+                last_of_messages(&alice_group, 1000),
+                Some(alice.uuid.clone()),
+            )
+            .unwrap();
+
+        let stored = stored_state_len(&bob, &bob_group.mls_group_id().unwrap());
+
+        assert!(stored > max_group_state_len_at_rest_in_tests(2));
+        assert!(stored <= max_group_state_len_at_rest_in_tests(10));
+    }
+
+    /// A group Alice created, see [`establish_group_with_mallory`].
+    struct WithMallory<C: MlsConfig> {
+        alice_group: Arc<MlsGroup>,
+        bob_group: Arc<MlsGroup>,
+        mallory_uuid: String,
+        mallory_group: Group<C>,
+        stranger_uuids: Vec<String>,
+    }
+
+    /// Creates a group of `alice`, `bob`, Mallory, a member playing a plain
+    /// mls-rs client, and `stranger_count` members nobody has met, who never
+    /// join, and joins Bob and Mallory to it.
+    fn establish_group_with_mallory(
+        alice: &TestUser,
+        bob: &TestUser,
+        stranger_count: usize,
+    ) -> WithMallory<impl MlsConfig> {
+        let group_uuid = new_group_uuid();
+
+        let mallory_uuid = Uuid::new_v4().to_string();
+        let mallory_client = plain_client(mallory_uuid.clone());
+
+        let mallory_invitation = InviteeKeyPackage {
+            user_uuid: mallory_uuid.clone(),
+            key_package: mallory_client
+                .generate_key_package_message(
+                    ExtensionList::default(),
+                    ExtensionList::default(),
+                    None,
+                )
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+        };
+
+        let strangers = stranger_invitations(stranger_count);
+        let stranger_uuids = strangers
+            .iter()
+            .map(|stranger| stranger.user_uuid.clone())
+            .collect::<Vec<_>>();
+
+        let creation = alice
+            .client
+            .create_group(
+                Some(group_uuid.clone()),
+                strangers
+                    .into_iter()
+                    .chain([bob.invitation(), mallory_invitation])
+                    .collect(),
+                None,
+            )
+            .unwrap();
+
+        let others = std::iter::once(alice.uuid.clone())
+            .chain(stranger_uuids.iter().cloned())
+            .chain([mallory_uuid.clone()])
+            .collect();
+
+        let joined = bob
+            .client
+            .join_group(creation.welcome.clone(), Some(group_uuid), others, true)
+            .unwrap();
+
+        let welcome = MlsMessage::from_bytes(&creation.welcome).unwrap();
+        let (mallory_group, _) = mallory_client.join_group(None, &welcome, None).unwrap();
+
+        WithMallory {
+            alice_group: alice.client.load_group(creation.mls_group_id).unwrap(),
+            bob_group: bob.client.load_group(joined).unwrap(),
+            mallory_uuid,
+            mallory_group,
+            stranger_uuids,
+        }
+    }
+
+    /// Has `mallory` send message after message, each the last of as many as
+    /// `reader`, `user`'s group, has room left to keep a key for, and `reader`
+    /// read each, until it refuses one: the group is then as full as `limit`,
+    /// what it may store, lets it be.
+    fn flood(
+        mallory: &mut Group<impl MlsConfig>,
+        reader: &MlsGroup,
+        user: &TestUser,
+        allowed_committer: &str,
+        limit: usize,
+    ) {
+        let group_id = reader.mls_group_id().unwrap();
+
+        loop {
+            // A key skipped takes some 34 bytes, and a message read skipping
+            // none none at all.
+            let room = limit.saturating_sub(stored_state_len(user, &group_id));
+            let count = (room / 36).clamp(2, 1000);
+
+            let mut last = None;
+
+            for _ in 0..count {
+                last = Some(
+                    mallory
+                        .encrypt_application_message(b"skipped", Vec::new())
+                        .unwrap(),
+                );
+            }
+
+            if let Err(error) = reader.process_incoming_message(
+                last.unwrap().to_bytes().unwrap(),
+                Some(allowed_committer.to_string()),
+            ) {
+                assert!(matches!(error, MlsError::GroupStateTooLarge));
+
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_creator_flooded_with_skipped_keys_can_still_add_members_and_remove_the_flooder() {
+        // Mallory, a member, has Alice, the creator, keep a key for every
+        // message she skips, until Alice may take in no more.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let mut group = establish_group_with_mallory(&alice, &bob, 5);
+        let group_id = group.alice_group.mls_group_id().unwrap();
+        let creator = Some(alice.uuid.clone());
+
+        flood(
+            &mut group.mallory_group,
+            &group.alice_group,
+            &alice,
+            &alice.uuid,
+            max_group_state_len_at_rest_in_tests(8),
+        );
+
+        assert!(
+            stored_state_len(&alice, &group_id) > max_group_state_len_at_rest_in_tests(8) - 1024
+        );
+
+        // She still adds somebody, and removes Mallory.
+        group
+            .alice_group
+            .add_members(stranger_invitations(1), None)
+            .unwrap();
+        group.alice_group.clear_pending_commit().unwrap();
+
+        let removal = group
+            .alice_group
+            .remove_members(vec![group.mallory_uuid.clone()])
+            .unwrap();
+        accept(&group.alice_group);
+
+        group
+            .bob_group
+            .process_incoming_message(removal, creator.clone())
+            .unwrap();
+
+        // The keys Mallory had her keep stay with the epoch they were taken
+        // in, and Alice sends again.
+        let message = group
+            .alice_group
+            .encrypt_application_message(b"still here".to_vec())
+            .unwrap();
+
+        assert!(matches!(
+            group
+                .bob_group
+                .process_incoming_message(message, creator)
+                .unwrap(),
+            ProcessedMessage::ApplicationMessage { .. }
+        ));
+    }
+
+    #[test]
+    fn test_a_member_as_full_as_it_may_be_follows_a_removal_leaving_a_much_smaller_group() {
+        // Mallory has Bob, in a group of a hundred, keep a key for every
+        // message she skips, until he may take in no more, and Alice removes
+        // everybody but the three of them. The record of the epoch her removal
+        // ends holds what Bob took in, more than a group of three may store,
+        // which only what a group may store outside tests reaches.
+        with_limits_outside_tests(|| {
+            let alice = TestUser::new();
+            let bob = TestUser::new();
+
+            let mut group = establish_group_with_mallory(&alice, &bob, MAX_GROUP_MEMBERS - 3);
+            let creator = Some(alice.uuid.clone());
+
+            flood(
+                &mut group.mallory_group,
+                &group.bob_group,
+                &bob,
+                &alice.uuid,
+                max_group_state_len_at_rest(MAX_GROUP_MEMBERS),
+            );
+
+            let removal = group
+                .alice_group
+                .remove_members(group.stranger_uuids.clone())
+                .unwrap();
+            accept(&group.alice_group);
+
+            group
+                .bob_group
+                .process_incoming_message(removal, creator.clone())
+                .unwrap();
+
+            assert_eq!(group.bob_group.members().unwrap().len(), 3);
+
+            let largest_record = bob
+                .store
+                .records()
+                .into_iter()
+                .filter(|((tag, _), _)| *tag == MlsNamespace::GroupEpoch.tag())
+                .map(|(_, sealed)| sealed.len() - 12 - 16)
+                .max()
+                .unwrap();
+
+            assert!(largest_record > max_group_state_len_at_rest(3));
+
+            // Bob is in the epoch Alice is in.
+            let message = group
+                .alice_group
+                .encrypt_application_message(b"fewer of us".to_vec())
+                .unwrap();
+
+            assert!(matches!(
+                group
+                    .bob_group
+                    .process_incoming_message(message, creator)
+                    .unwrap(),
+                ProcessedMessage::ApplicationMessage { .. }
+            ));
+        });
     }
 
     #[test]
@@ -1785,7 +2756,7 @@ mod tests {
         bob.client
             .load_group(group_id.clone())
             .unwrap()
-            .process_incoming_message(first.clone())
+            .process_incoming_message(first.clone(), None)
             .unwrap();
 
         let error = bob
@@ -1799,13 +2770,17 @@ mod tests {
         // spent, and the next one opens.
         let bob_group = bob.client.load_group(group_id.clone()).unwrap();
 
-        assert!(bob_group.process_incoming_message(first.clone()).is_err());
+        assert!(
+            bob_group
+                .process_incoming_message(first.clone(), None)
+                .is_err()
+        );
 
         let second = alice_group
             .encrypt_application_message(b"second".to_vec())
             .unwrap();
 
-        assert!(bob_group.process_incoming_message(second).is_ok());
+        assert!(bob_group.process_incoming_message(second, None).is_ok());
 
         // Deleting the group does not make its Welcome a way back in, which
         // would let the first message be read a second time.
@@ -1906,7 +2881,7 @@ mod tests {
             bob.client
                 .load_group(joined)
                 .unwrap()
-                .process_incoming_message(message)
+                .process_incoming_message(message, None)
                 .is_ok()
         );
     }
@@ -1928,8 +2903,8 @@ mod tests {
         assert_eq!(bob.store.records(), before);
 
         // A group of exactly the cap is read, every member but Bob listed:
-        // nothing is stored, so the 64 KB a test lets a group store does not
-        // stop it as it stops the join.
+        // nothing is stored, so the 260 KB a test lets a group of a hundred
+        // store does not stop it as it stops the join.
         let (welcome, group_uuid, mut others) = welcome_to_a_group_of(MAX_GROUP_MEMBERS, &bob);
         let before = bob.store.records();
 
@@ -2000,6 +2975,223 @@ mod tests {
                 .unwrap_err(),
             MlsError::GroupAlreadyJoined
         ));
+
+        assert_eq!(bob.store.records(), before);
+    }
+
+    #[test]
+    fn test_a_member_added_back_joins_at_the_later_epoch_while_the_old_welcome_stays_refused() {
+        // Carol joined through her last-resort key package, which survives the
+        // join, so the Welcome she joined from still opens: only the record of
+        // the group refuses it.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let last_resort = InviteeKeyPackage {
+            user_uuid: carol.uuid.clone(),
+            key_package: carol
+                .client
+                .generate_key_packages(0)
+                .unwrap()
+                .last_resort_key_package,
+        };
+
+        let group_uuid = new_group_uuid();
+
+        let creation = alice
+            .client
+            .create_group(
+                Some(group_uuid.clone()),
+                vec![bob.invitation(), last_resort],
+                None,
+            )
+            .unwrap();
+
+        let first_welcome = creation.welcome;
+
+        let alice_group = alice
+            .client
+            .load_group(creation.mls_group_id.clone())
+            .unwrap();
+
+        let joined = [(&bob, &carol), (&carol, &bob)].map(|(user, other)| {
+            let group_id = user
+                .client
+                .join_group(
+                    first_welcome.clone(),
+                    Some(group_uuid.clone()),
+                    uuids(&[&alice, other]),
+                    true,
+                )
+                .unwrap();
+
+            user.client.load_group(group_id).unwrap()
+        });
+
+        let creator = Some(alice.uuid.clone());
+
+        // Alice removes Carol, and adds her back.
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        for group in &joined {
+            group
+                .process_incoming_message(removal.clone(), creator.clone())
+                .unwrap();
+        }
+
+        accept(&alice_group);
+
+        let addition = alice_group
+            .add_members(vec![carol.invitation()], None)
+            .unwrap();
+
+        joined[0]
+            .process_incoming_message(addition.commit, creator.clone())
+            .unwrap();
+
+        accept(&alice_group);
+
+        // While Carol still holds the group, neither Welcome is joined.
+        for welcome in [&first_welcome, &addition.welcome] {
+            assert!(matches!(
+                carol
+                    .client
+                    .inspect_welcome(welcome.clone(), Some(group_uuid.clone()))
+                    .unwrap_err(),
+                MlsError::GroupAlreadyJoined
+            ));
+        }
+
+        // Once she drops it, as a removed member does, the Welcome she first
+        // joined from is still refused, and the later one adding her back is
+        // not.
+        carol.client.delete_group(creation.mls_group_id).unwrap();
+
+        assert!(matches!(
+            carol
+                .client
+                .inspect_welcome(first_welcome.clone(), Some(group_uuid.clone()))
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
+        assert!(matches!(
+            carol
+                .client
+                .join_group(
+                    first_welcome.clone(),
+                    Some(group_uuid.clone()),
+                    uuids(&[&alice, &bob]),
+                    true,
+                )
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
+
+        let inspection = carol
+            .client
+            .inspect_welcome(addition.welcome.clone(), Some(group_uuid.clone()))
+            .unwrap();
+
+        assert_eq!(inspection.committer_user_uuid, alice.uuid);
+
+        let rejoined = carol
+            .client
+            .join_group(
+                addition.welcome,
+                Some(group_uuid.clone()),
+                inspection.member_uuids,
+                true,
+            )
+            .unwrap();
+
+        let carol_group = carol.client.load_group(rejoined).unwrap();
+
+        // In the epoch everybody else is in, and reading them again.
+        assert_eq!(carol_group.epoch().unwrap(), alice_group.epoch().unwrap());
+
+        let message = alice_group
+            .encrypt_application_message(b"welcome back".to_vec())
+            .unwrap();
+
+        assert!(matches!(
+            carol_group
+                .process_incoming_message(message, creator)
+                .unwrap(),
+            ProcessedMessage::ApplicationMessage { .. }
+        ));
+
+        // The first Welcome is refused once more, as one to a group she holds.
+        assert!(matches!(
+            carol
+                .client
+                .inspect_welcome(first_welcome, Some(group_uuid))
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
+    }
+
+    #[test]
+    fn test_the_record_of_a_deleted_group_refuses_every_welcome_once_it_cannot_be_read() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob]);
+        let (alice_group, bob_group) = (&groups[0], &groups[1]);
+        let group_id = alice_group.mls_group_id().unwrap();
+
+        // Alice removes Bob, who drops the group, and adds him back.
+        let removal = alice_group.remove_members(vec![bob.uuid.clone()]).unwrap();
+
+        bob_group
+            .process_incoming_message(removal, Some(alice.uuid.clone()))
+            .unwrap();
+        bob.client.delete_group(group_id.clone()).unwrap();
+
+        accept(alice_group);
+
+        let addition = alice_group
+            .add_members(vec![bob.invitation()], None)
+            .unwrap();
+
+        bob.client
+            .inspect_welcome(addition.welcome.clone(), Some(group_uuid.clone()))
+            .unwrap();
+
+        // Once the record no longer says which epoch the group was at, the
+        // Welcome adding him back is refused like the one he joined from.
+        let key = [b"deleted-group/".as_slice(), &group_id].concat();
+
+        bob.store
+            .put(MlsNamespace::Metadata, key, b"unreadable".to_vec())
+            .unwrap();
+
+        assert!(matches!(
+            bob.client
+                .inspect_welcome(addition.welcome, Some(group_uuid))
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
+    }
+
+    #[test]
+    fn test_deleting_a_group_deleted_already_leaves_the_record_of_its_deletion_as_it_was() {
+        // As a host deleting it again does, not knowing its first try stored
+        // everything.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob]);
+        let group_id = groups[1].mls_group_id().unwrap();
+
+        bob.client.delete_group(group_id.clone()).unwrap();
+
+        let before = bob.store.records();
+
+        bob.client.delete_group(group_id).unwrap();
 
         assert_eq!(bob.store.records(), before);
     }
@@ -2129,7 +3321,7 @@ mod tests {
             .encrypt_application_message(b"still here".to_vec())
             .unwrap();
 
-        assert!(carol_group.process_incoming_message(message).is_ok());
+        assert!(carol_group.process_incoming_message(message, None).is_ok());
     }
 
     #[test]
@@ -2266,7 +3458,7 @@ mod tests {
         bob.reopen()
             .load_group(groups[1].mls_group_id().unwrap())
             .unwrap()
-            .process_incoming_message(message)
+            .process_incoming_message(message, None)
             .unwrap();
 
         assert!(
@@ -2386,11 +3578,12 @@ mod tests {
             .find(|key| key.starts_with(b"deleted-group/"))
             .unwrap();
 
+        // When the key packages expire, the first eight bytes of the record.
         let openable_until = u64::from_be_bytes(
             bob.store
                 .get(MlsNamespace::Metadata, record)
                 .unwrap()
-                .unwrap()
+                .unwrap()[..8]
                 .try_into()
                 .unwrap(),
         );
@@ -2751,7 +3944,10 @@ mod tests {
         let bob_client = bob.reopen();
         let bob_group = bob_client.load_group(group_id).unwrap();
 
-        match bob_group.process_incoming_message(ciphertext).unwrap() {
+        match bob_group
+            .process_incoming_message(ciphertext, None)
+            .unwrap()
+        {
             ProcessedMessage::ApplicationMessage { payload, .. } => {
                 assert_eq!(payload, b"before the restart");
             }
@@ -2852,7 +4048,9 @@ mod tests {
 
         // The server happens to store Bob's first, so Bob's wins for everyone.
         assert!(matches!(
-            alice_group.process_incoming_message(bob_commit).unwrap(),
+            alice_group
+                .process_incoming_message(bob_commit, None)
+                .unwrap(),
             ProcessedMessage::Commit { .. }
         ));
 
@@ -2866,7 +4064,11 @@ mod tests {
         assert_eq!(bob_group.epoch().unwrap(), epoch_before + 1);
 
         // Bob rejects Alice's now-stale commit rather than forking.
-        assert!(bob_group.process_incoming_message(alice_commit).is_err());
+        assert!(
+            bob_group
+                .process_incoming_message(alice_commit, None)
+                .is_err()
+        );
 
         // The group is still usable by both.
         let ciphertext = bob_group
@@ -2874,7 +4076,9 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            alice_group.process_incoming_message(ciphertext).unwrap(),
+            alice_group
+                .process_incoming_message(ciphertext, None)
+                .unwrap(),
             ProcessedMessage::ApplicationMessage { .. }
         ));
     }
@@ -2968,18 +4172,18 @@ mod tests {
 
         assert!(matches!(
             alice_group
-                .process_incoming_message(proposal.clone())
+                .process_incoming_message(proposal.clone(), None)
                 .unwrap(),
             ProcessedMessage::Proposal { .. }
         ));
 
-        bob_group.process_incoming_message(proposal).unwrap();
+        bob_group.process_incoming_message(proposal, None).unwrap();
 
         // A remaining member commits it, and only then is Carol gone.
         let commit = alice_group.update().unwrap();
         accept(alice_group);
 
-        bob_group.process_incoming_message(commit).unwrap();
+        bob_group.process_incoming_message(commit, None).unwrap();
 
         let mut expected = vec![alice.uuid.clone(), bob.uuid.clone()];
         expected.sort();
@@ -3030,6 +4234,61 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn test_a_group_whose_state_does_not_open_is_deleted_all_the_same() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob]);
+        let group_id = groups[1].mls_group_id().unwrap();
+
+        drop(groups);
+
+        // Bob's state fails authentication, as one the host damaged does.
+        let mut sealed = bob
+            .store
+            .get(MlsNamespace::GroupState, group_id.clone())
+            .unwrap()
+            .unwrap();
+        *sealed.last_mut().unwrap() ^= 1;
+
+        bob.store
+            .put(MlsNamespace::GroupState, group_id.clone(), sealed)
+            .unwrap();
+
+        assert!(matches!(
+            bob.client.load_group(group_id.clone()).unwrap_err(),
+            MlsError::StorageIntegrityFailed
+        ));
+
+        bob.client.delete_group(group_id.clone()).unwrap();
+
+        assert!(matches!(
+            bob.client.load_group(group_id.clone()).unwrap_err(),
+            MlsError::GroupNotFound
+        ));
+        assert!(bob.store.keys(MlsNamespace::GroupEpoch).unwrap().is_empty());
+
+        // The epoch it was at unknown, every Welcome to it is refused, even one
+        // adding Bob back later.
+        let alice_group = alice.client.load_group(group_id).unwrap();
+
+        alice_group.remove_members(vec![bob.uuid.clone()]).unwrap();
+        accept(&alice_group);
+
+        let addition = alice_group
+            .add_members(vec![bob.invitation()], None)
+            .unwrap();
+
+        assert!(matches!(
+            bob.client
+                .inspect_welcome(addition.welcome, Some(group_uuid))
+                .unwrap_err(),
+            MlsError::GroupAlreadyJoined
+        ));
     }
 
     /// Whether a serialised key package carries the last-resort extension.

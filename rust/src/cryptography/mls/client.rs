@@ -10,7 +10,7 @@ use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use crate::cryptography::mls::{
     MAX_GROUP_MEMBERS, MlsError,
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
-    group::{MlsGroup, expected_peers, peers, pin_peers},
+    group::{MlsGroup, expected_peers, peers, pin_peers, store},
     group_id::{self, new_mls_group_id},
     identity::{
         credential::{credential_for, user_uuid_from},
@@ -236,9 +236,9 @@ impl MlsClient {
     /// The records of the deleted groups go too once every key package held
     /// when they were deleted is pruned: no Welcome this device was joined from
     /// can be opened again, so none can put such a group back at an epoch this
-    /// device held, see [`delete_group`](Self::delete_group). A later Welcome
-    /// re-adding this device to one of them, at a new epoch, is then joined like
-    /// any other.
+    /// device held, see [`delete_group`](Self::delete_group). A Welcome adding
+    /// this device back to one of them, for a later epoch, is joined before as
+    /// after.
     ///
     /// Call it after publishing, which is when they pile up, and only once
     /// nothing waiting for the user on the server is left unread. See
@@ -362,7 +362,7 @@ impl MlsClient {
         // Applying immediately is safe here, and only here: this user is the
         // only member, so no other view of the group can diverge from it.
         group.apply_pending_commit()?;
-        group.write_to_storage()?;
+        store(&mut group)?;
 
         Ok(GroupCreation {
             mls_group_id: group_id,
@@ -382,11 +382,11 @@ impl MlsClient {
     /// It exists for a host that decides whether to trust a Welcome from what
     /// the Welcome itself says, its committer and its payload. That decision
     /// has to come before [`join_group`](Self::join_group) stores the group,
-    /// since a group once stored can never be joined again, even if deleted at
-    /// once: a Welcome joined only to be found wanting, or left for later,
-    /// would leave its group unjoinable on this device. Once the host trusts
-    /// it, it joins with [`WelcomeInspection::member_uuids`] as the expected
-    /// members.
+    /// since a Welcome once joined can never be joined again, even if its
+    /// group is deleted at once: one joined only to be found wanting, or left
+    /// for later, would leave its group unjoinable on this device until a
+    /// later Welcome added this user to it again. Once the host trusts it, it
+    /// joins with [`WelcomeInspection::member_uuids`] as the expected members.
     ///
     /// The group's id is checked against the one derived for
     /// `expected_group_uuid`, as on a join, so no Welcome to another group is
@@ -421,8 +421,7 @@ impl MlsClient {
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them.
     /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
-    /// * `MlsError::GroupAlreadyJoined` - If this device holds the group, or
-    ///   deleted it and has not forgotten it yet.
+    /// * `MlsError::GroupAlreadyJoined` - As on [`join_group`](Self::join_group).
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the Welcome is not addressed to this
     ///   user, or its one-time key package has already been used.
@@ -486,16 +485,28 @@ impl MlsClient {
     /// first among the messages waiting for this user there, and never from
     /// one posted later.
     ///
-    /// A Welcome for a group this device has already joined is refused, even
-    /// once the group is deleted. A last-resort key package survives the joins
-    /// it serves, so the same Welcome can be replayed, and joining it again
-    /// would put the group back at the epoch the Welcome was for. A deleted
+    /// A Welcome for a group this device holds is refused, and so is one for a
+    /// group it deleted, unless it is for an epoch past the one the group was
+    /// at when deleted. A last-resort key package survives the joins it
+    /// serves, so the same Welcome can be replayed, and joining it again would
+    /// put the group back at the epoch the Welcome was for: any Welcome this
+    /// device was joined from is for that epoch or an earlier one. A deleted
     /// group is forgotten once that key package is pruned, see
     /// [`prune_key_packages`](Self::prune_key_packages): no such Welcome opens
     /// by then. With the id derived, and the Welcome to a group the API holds
     /// the one it stored, a Welcome refused this way is one to the group this
     /// device joined before, never a channel's or a contact request's that took
     /// its id.
+    ///
+    /// One for a later epoch is let through, and is not necessarily the
+    /// group's own: the creator adding this user back to a group they were
+    /// removed from writes one, but so can anybody who knows the group's UUID,
+    /// as every member does, for a group of their own under the same id,
+    /// putting it at whichever epoch they like, see [`group_id`]. A host joining a group it
+    /// left back does so only from the Welcome the API stored with this user's
+    /// addition, as above, and only once
+    /// [`inspect_welcome`](Self::inspect_welcome) names as its committer the
+    /// creator it recorded for the group.
     ///
     /// # Arguments
     ///
@@ -527,7 +538,8 @@ impl MlsClient {
     /// * `MlsError::UnexpectedMembers` - If the group's members are not exactly
     ///   this user and `expected_members`.
     /// * `MlsError::GroupAlreadyJoined` - If this device holds the group, or
-    ///   deleted it and has not forgotten it yet.
+    ///   deleted it at the Welcome's epoch or a later one and has not
+    ///   forgotten it yet.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the Welcome is not addressed to this
     ///   user, or its one-time key package has already been used.
@@ -551,7 +563,7 @@ impl MlsClient {
             pin_peers(&self.pins, &peers)?;
         }
 
-        opened.group.write_to_storage()?;
+        store(&mut opened.group)?;
 
         Ok(opened.group.group_id().to_vec())
     }
@@ -586,6 +598,14 @@ impl MlsClient {
     /// a group creation was rejected by the server. Nothing else removes group
     /// secrets: MLS keeps them even after the local member is removed.
     ///
+    /// The epoch the group is at is kept, so that every Welcome it was joined
+    /// from stays refused, while a later one adding this user back to it can
+    /// be joined, see [`join_group`](Self::join_group). A group whose stored
+    /// state no longer opens is deleted too, every Welcome to it refused until
+    /// [`prune_key_packages`](Self::prune_key_packages) forgets it. A group
+    /// this device does not hold, deleted already or never joined, is left as
+    /// it is.
+    ///
     /// # Arguments
     ///
     /// * `mls_group_id` - The group to forget.
@@ -598,13 +618,28 @@ impl MlsClient {
         // Under the client lock, like every other MLS operation: a key package
         // generated, and joined from, between reading them and writing the
         // record would otherwise not count towards it.
-        let _client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+        let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+
+        // A group no longer stored was either deleted already, and keeps the
+        // record written then, with the epoch it was at, or never joined, and
+        // has no Welcome to refuse. One whose state no longer opens, damaged
+        // or written by another version of mls-rs, goes all the same, as
+        // nothing else would ever remove it: not knowing the epoch it was at,
+        // the record refuses every Welcome to it until pruning forgets it.
+        // Only a storage failure says nothing of the state, and is worth
+        // trying again.
+        let epoch = match client.load_group(&mls_group_id).map_err(MlsError::from) {
+            Ok(group) => group.current_epoch(),
+            Err(MlsError::GroupNotFound) => return Ok(()),
+            Err(error @ MlsError::StorageFailed(_)) => return Err(error),
+            Err(_) => u64::MAX,
+        };
 
         // Holding none, it can open no Welcome, and the record may go at once.
         let openable_until = self.key_packages.latest_expiration()?.unwrap_or(0);
 
         self.group_states
-            .delete_group(&mls_group_id, openable_until)
+            .delete_group(&mls_group_id, openable_until, epoch)
     }
 
     /// The safety number of this user and another, if a key is pinned for them.
@@ -769,7 +804,10 @@ impl MlsClient {
             return Err(MlsError::TooManyMembers);
         }
 
-        if self.group_states.has_held(group.group_id())? {
+        if self
+            .group_states
+            .has_held(group.group_id(), group.current_epoch())?
+        {
             return Err(MlsError::GroupAlreadyJoined);
         }
 

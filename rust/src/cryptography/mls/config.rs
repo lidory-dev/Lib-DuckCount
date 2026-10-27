@@ -8,21 +8,25 @@
 //! why, because the defaults are reasonable and a future reader should not
 //! "restore" them by accident.
 
+use std::cell::RefCell;
 use std::time::Duration;
 
 use mls_rs::client_builder::{
     BaseConfig, PaddingMode, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
-    WithKeyPackageRepo,
+    WithKeyPackageRepo, WithMlsRules,
 };
+use mls_rs::group::{GroupContext, Roster};
 use mls_rs::identity::SigningIdentity;
-use mls_rs::mls_rules::{CommitOptions, DefaultMlsRules, EncryptionOptions};
-use mls_rs::{Client, CryptoProvider};
+use mls_rs::mls_rules::{
+    CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle,
+};
+use mls_rs::{Client, CryptoProvider, MlsRules};
 use mls_rs_core::crypto::SignatureSecretKey;
 use mls_rs_crypto_awslc::AwsLcCryptoProvider;
 
 use crate::cryptography::mls::{
     CIPHER_SUITE, MlsError,
-    identity::pinning_provider::PinningIdentityProvider,
+    identity::{credential::user_uuid_from, pinning_provider::PinningIdentityProvider},
     storage::{group_state::SealedGroupStateStorage, key_package::SealedKeyPackageStorage},
 };
 
@@ -52,13 +56,16 @@ pub(crate) const KEY_PACKAGE_RETENTION_AFTER_EXPIRY: Duration =
 ///
 /// The pre-shared key slot keeps its in-memory default: DuckCount never injects
 /// external PSKs, so nothing is ever stored there.
-pub type DuckCountMlsConfig = WithIdentityProvider<
-    PinningIdentityProvider,
-    WithCryptoProvider<
-        AwsLcCryptoProvider,
-        WithGroupStateStorage<
-            SealedGroupStateStorage,
-            WithKeyPackageRepo<SealedKeyPackageStorage, BaseConfig>,
+pub type DuckCountMlsConfig = WithMlsRules<
+    DuckCountMlsRules,
+    WithIdentityProvider<
+        PinningIdentityProvider,
+        WithCryptoProvider<
+            AwsLcCryptoProvider,
+            WithGroupStateStorage<
+                SealedGroupStateStorage,
+                WithKeyPackageRepo<SealedKeyPackageStorage, BaseConfig>,
+            >,
         >,
     >,
 >;
@@ -74,7 +81,7 @@ pub fn crypto_provider() -> AwsLcCryptoProvider {
 }
 
 /// The protocol rules every DuckCount client applies.
-pub fn mls_rules() -> DefaultMlsRules {
+pub fn mls_rules() -> DuckCountMlsRules {
     let commit_options = CommitOptions::new()
         // The server stores no ratchet tree, so it has to travel with the
         // Welcome. This is already the mls-rs default; it is set explicitly
@@ -103,9 +110,105 @@ pub fn mls_rules() -> DefaultMlsRules {
         PaddingMode::StepFunction,
     );
 
-    DefaultMlsRules::new()
-        .with_commit_options(commit_options)
-        .with_encryption_options(encryption_options)
+    DuckCountMlsRules {
+        commit_options,
+        encryption_options,
+    }
+}
+
+/// The protocol rules of [`mls_rules`]: the options it sets, and on receipt,
+/// the one member the host allows to commit, see `with_allowed_committer`.
+#[derive(Clone, Debug)]
+pub struct DuckCountMlsRules {
+    commit_options: CommitOptions,
+    encryption_options: EncryptionOptions,
+}
+
+impl MlsRules for DuckCountMlsRules {
+    type Error = MlsError;
+
+    /// Refuses a received Commit from anybody but the member allowed to
+    /// commit, if the host named one, and lets every other Commit through as
+    /// it is, as mls-rs's own rules do.
+    ///
+    /// mls-rs asks this once it has authenticated the Commit, and before it
+    /// checks anything the Commit carries: the identity of each member it
+    /// adds or updates above all, which the identity provider checks against
+    /// the keys pinned for them. A member who may not commit would otherwise
+    /// choose which error the Commit is refused with, and whom it names: an
+    /// `IdentityKeyMismatch` for a contact of the receiver, say, which tells
+    /// of a key that contact never changed.
+    fn filter_proposals(
+        &self,
+        direction: CommitDirection,
+        source: CommitSource,
+        _current_roster: &Roster,
+        _current_context: &GroupContext,
+        proposals: ProposalBundle,
+    ) -> Result<ProposalBundle, MlsError> {
+        // A Commit from outside the group comes as a PublicMessage, which
+        // `MlsGroup::process_incoming_message` refuses before mls-rs reads it.
+        if direction == CommitDirection::Receive
+            && let CommitSource::ExistingMember(committer) = &source
+            && let Some(allowed_committer) = ALLOWED_COMMITTER.with_borrow(Clone::clone)
+            && user_uuid_from(&committer.signing_identity.credential)? != allowed_committer
+        {
+            return Err(MlsError::UnauthorizedChange);
+        }
+
+        Ok(proposals)
+    }
+
+    fn commit_options(
+        &self,
+        _new_roster: &Roster,
+        _new_context: &GroupContext,
+        _proposals: &ProposalBundle,
+    ) -> Result<CommitOptions, MlsError> {
+        Ok(self.commit_options)
+    }
+
+    fn encryption_options(
+        &self,
+        _current_roster: &Roster,
+        _current_context: &GroupContext,
+    ) -> Result<EncryptionOptions, MlsError> {
+        Ok(self.encryption_options)
+    }
+}
+
+thread_local! {
+    /// The only member whose Commits the group this thread is processing a
+    /// message for applies, if the host named one, see
+    /// [`with_allowed_committer`].
+    static ALLOWED_COMMITTER: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Runs `process`, which processes a message, refusing a Commit from anybody
+/// but `allowed_committer`, a user UUID, if given, see
+/// [`DuckCountMlsRules::filter_proposals`].
+///
+/// mls-rs hands its rules the group and the Commit and nothing more, and the
+/// client holds a single copy of them for every group. They run within the
+/// group's `process_incoming_message`, though, on the thread that called it,
+/// so a committer kept for that thread while `process` runs reaches that
+/// message and no other.
+pub(crate) fn with_allowed_committer<T>(
+    allowed_committer: Option<String>,
+    process: impl FnOnce() -> T,
+) -> T {
+    /// Puts back the committer there was, however `process` ends.
+    struct Restore(Option<String>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ALLOWED_COMMITTER.set(self.0.take());
+        }
+    }
+
+    let _restore = Restore(ALLOWED_COMMITTER.replace(allowed_committer));
+
+    process()
 }
 
 /// Assembles a client from an identity and the storage adapters backing it.

@@ -113,12 +113,18 @@ pub enum ProcessedMessage {
         /// a pin taken later.
         is_sender_pinned: bool,
     },
-    /// A Commit was applied and the group advanced to a new epoch.
+    /// A Commit was applied: the group advanced to a new epoch, or the local
+    /// user was removed from it.
     Commit {
-        /// UUID of the member that committed, absent when that member left the
-        /// group in this very Commit.
+        /// UUID of the member that committed.
+        ///
+        /// Never absent in practice: mls-rs refuses a Commit removing its own
+        /// committer, so they are still in the group once it is applied, and
+        /// every member's credential was checked as they entered it.
         committer_user_uuid: Option<String>,
-        /// The epoch the group is now in.
+        /// The epoch the group is now in. For the local user removed by this
+        /// Commit, the epoch it was in before: mls-rs does not take a removed
+        /// member into an epoch they are no longer part of.
         epoch: u64,
         /// Whether this Commit removed the local user from the group. When
         /// true, no further messages can be sent or read, and the host should

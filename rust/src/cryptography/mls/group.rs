@@ -29,8 +29,15 @@
 //! strictly in that order is therefore all a client has to do. If a Commit
 //! arrives while this client has one pending, applying the incoming one clears
 //! the pending commit automatically; the local change simply did not happen and
-//! has to be reissued. Add and remove are owner-only server-side, so the case
-//! that actually arises is two members calling [`update`](MlsGroup::update).
+//! has to be reissued.
+//!
+//! In a group the DuckCount API holds, only its creator commits, and every
+//! member refuses a Commit from anybody else, see
+//! [`process_incoming_message`](MlsGroup::process_incoming_message). A refused
+//! Commit applies nothing and clears nothing, a Commit of the creator's still
+//! pending included, so the creator's never lose to another member's: what
+//! can still compete is two members of a group with no such rule calling
+//! [`update`](MlsGroup::update).
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -41,10 +48,13 @@ use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
     MAX_GROUP_MEMBERS, MlsError,
-    config::DuckCountMlsConfig,
+    config::{DuckCountMlsConfig, with_allowed_committer},
     identity::{credential::user_uuid_from, fingerprint::fingerprint},
     invitation::{pin_invitees, shared_welcome, validate_invitees, welcome_payload_extensions},
-    storage::identity_pin::IdentityPinStore,
+    storage::{
+        group_state::{Allowance, with_allowance},
+        identity_pin::IdentityPinStore,
+    },
     types::{
         AddMembersOutput, ApplicationMessage, InviteeKeyPackage, MemberInfo, ProcessedMessage,
     },
@@ -249,7 +259,9 @@ impl MlsGroup {
             return Err(MlsError::UnexpectedMembers);
         }
 
-        if group.roster().members_iter().count() + invitees.len() > MAX_GROUP_MEMBERS {
+        let member_count = member_count(&group) + invitees.len();
+
+        if member_count > MAX_GROUP_MEMBERS {
             return Err(MlsError::TooManyMembers);
         }
 
@@ -270,7 +282,9 @@ impl MlsGroup {
 
         pin_invitees(&self.pins, &invitees)?;
 
-        group.write_to_storage()?;
+        // As the group the Commit makes: the state it keeps pending is that
+        // group's, beside the one it is now.
+        store_within(&mut group, Allowance::BuildingCommit(member_count))?;
 
         Ok(AddMembersOutput {
             commit: commit_output.commit_message.to_bytes()?,
@@ -298,12 +312,20 @@ impl MlsGroup {
     ///   group may store.
     /// * `MlsError::MemberNotFound` - If a UUID is not a current member.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
-    /// * `MlsError::ProtocolFailed` - If a Commit is already pending, the list is
-    ///   empty, or it names this user (leaving is
+    /// * `MlsError::ProtocolFailed` - If the list is empty (nothing is built), a
+    ///   Commit is already pending, or the list names this user (leaving is
     ///   [`propose_self_remove`](Self::propose_self_remove), not a removal).
     /// * `MlsError::StorageFailed` - If the pending state cannot be stored.
     pub fn remove_members(&self, user_uuids: Vec<String>) -> Result<Vec<u8>, MlsError> {
         let mut group = self.locked()?;
+
+        // Before anything is built, as in `add_members`: mls-rs would build an
+        // update the host never asked for, and keep it pending.
+        if user_uuids.is_empty() {
+            return Err(MlsError::ProtocolFailed(
+                "A commit removing nobody removes nobody.".to_string(),
+            ));
+        }
 
         // Indices are resolved up front: the roster cannot be queried once the
         // commit builder holds a mutable borrow of the group.
@@ -325,7 +347,10 @@ impl MlsGroup {
 
         let commit_output = commit_builder.build()?;
 
-        group.write_to_storage()?;
+        // As the group it removes them from, which it is until applied.
+        let member_count = member_count(&group);
+
+        store_within(&mut group, Allowance::BuildingCommit(member_count))?;
 
         commit_output.commit_message.to_bytes().map_err(Into::into)
     }
@@ -336,6 +361,10 @@ impl MlsGroup {
     /// attacker may have captured stops being useful, which is the whole point
     /// of doing it periodically. There is no dedicated API route, send the
     /// Commit through `POST /groups/{uuid}/messages` like any other message.
+    ///
+    /// Members allowing a single committer, see
+    /// [`process_incoming_message`](Self::process_incoming_message), refuse it
+    /// from anybody else.
     ///
     /// # Returns
     ///
@@ -354,7 +383,9 @@ impl MlsGroup {
 
         let commit_output = group.commit(Vec::new())?;
 
-        group.write_to_storage()?;
+        let member_count = member_count(&group);
+
+        store_within(&mut group, Allowance::BuildingCommit(member_count))?;
 
         commit_output.commit_message.to_bytes().map_err(Into::into)
     }
@@ -369,6 +400,10 @@ impl MlsGroup {
     /// API calls the corresponding field a "commit" in
     /// `PUT /users/{uuid}/deletion`, but it relays the bytes without inspecting
     /// them, so the proposal travels there unchanged.
+    ///
+    /// Members allowing a single committer, see
+    /// [`process_incoming_message`](Self::process_incoming_message), refuse it:
+    /// there, the user is out once that member removes them.
     ///
     /// # Returns
     ///
@@ -387,7 +422,7 @@ impl MlsGroup {
 
         let proposal = group.propose_self_remove(Vec::new())?;
 
-        group.write_to_storage()?;
+        store(&mut group)?;
 
         proposal.to_bytes().map_err(Into::into)
     }
@@ -408,7 +443,9 @@ impl MlsGroup {
     /// # Errors
     ///
     /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most a
-    ///   group may store.
+    ///   group may store. While a Commit of this user's is pending, this can
+    ///   be for the room the Commit takes, and the payload is then sent once
+    ///   the Commit is applied or discarded, see [`MlsError::GroupStateTooLarge`].
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If proposals are pending and must be
     ///   committed first, or encryption fails.
@@ -418,16 +455,41 @@ impl MlsGroup {
 
         let message = group.encrypt_application_message(&payload, Vec::new())?;
 
-        group.write_to_storage()?;
+        store(&mut group)?;
 
         message.to_bytes().map_err(Into::into)
     }
 
     /// Processes one message drained from the group's queue.
     ///
-    /// A Commit is applied and a Proposal kept, whichever member sent them. A
-    /// group whose members never change is read with
-    /// [`read_application_message`](Self::read_application_message) instead.
+    /// An application message is read whichever member sent it. A Commit is
+    /// applied and a Proposal kept, whichever member sent them, unless
+    /// `allowed_committer` names the one member who may change the group: a
+    /// Commit from anybody else is then refused, and so is every Proposal,
+    /// that member's own included. A group whose members never change is read
+    /// with [`read_application_message`](Self::read_application_message)
+    /// instead.
+    ///
+    /// The members of a group the DuckCount API holds name its creator, who
+    /// alone adds and removes members. A Commit from anybody else would add or
+    /// remove whoever they chose, and a Proposal is of no use to the creator,
+    /// who commits what they change themselves: kept, it would stop the group
+    /// sending until somebody committed it, and be committed along with the
+    /// creator's next change, adding or removing somebody they never chose. A
+    /// departing member's proposal to remove themselves goes the same way: it
+    /// is for the creator to remove them.
+    ///
+    /// A Commit from anybody else is refused before mls-rs checks anything it
+    /// carries, the members it adds or updates above all: whoever may not
+    /// commit gets no other error than this one out of it, nor one naming a
+    /// member of their choosing, such as an `IdentityKeyMismatch` for a
+    /// contact of this user's whose key never changed. Only what fails before
+    /// mls-rs gets to what the Commit changes, authentication above all, is
+    /// refused otherwise, with an error that names nobody.
+    ///
+    /// A refused message stores nothing and leaves the group as it was, a
+    /// Commit of this user's still pending included: the next message is
+    /// processed as if it had never come.
     ///
     /// # Warning
     ///
@@ -438,6 +500,9 @@ impl MlsGroup {
     /// # Arguments
     ///
     /// * `message` - The ciphertext from `GET /groups/{uuid}/messages`.
+    /// * `allowed_committer` - The UUID of the only member whose Commits are
+    ///   applied, in canonical hyphenated lowercase form, or `None` to apply
+    ///   any member's, and keep their Proposals.
     ///
     /// # Returns
     ///
@@ -445,17 +510,28 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
+    /// * `MlsError::UnauthorizedChange` - If `allowed_committer` is given and
+    ///   the message is a Commit from anybody else, or a Proposal. Nothing is
+    ///   stored.
     /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or was not
     ///   encrypted to the group.
     /// * `MlsError::GroupStateTooLarge` - If what the message did would grow
-    ///   the group past the most a group may store.
+    ///   the group past the most a group may store. While a Commit of this
+    ///   user's is pending, this can be for the room the Commit takes, and the
+    ///   message is then read once the Commit is applied or discarded: keep it
+    ///   until then, see [`MlsError::GroupStateTooLarge`].
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
-    ///   from the one pinned for them.
+    ///   from the one pinned for them: a member the Commit adds or updates,
+    ///   from the committer allowed if one is given.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the message belongs to another group, is
     ///   for an epoch too old to still be retained, or fails authentication.
     /// * `MlsError::StorageFailed` - If the resulting state cannot be stored.
-    pub fn process_incoming_message(&self, message: Vec<u8>) -> Result<ProcessedMessage, MlsError> {
+    pub fn process_incoming_message(
+        &self,
+        message: Vec<u8>,
+        allowed_committer: Option<String>,
+    ) -> Result<ProcessedMessage, MlsError> {
         let message = MlsMessage::from_bytes(&message).map_err(|_| MlsError::InvalidMessage)?;
 
         // Members encrypt their commits and proposals as well as their application
@@ -469,7 +545,9 @@ impl MlsGroup {
         }
 
         self.change_and_store(|group| {
-            let received = group.process_incoming_message(message)?;
+            let received = with_allowed_committer(allowed_committer.clone(), || {
+                group.process_incoming_message(message)
+            })?;
 
             let processed = match received {
                 ReceivedMessage::ApplicationMessage(description) => {
@@ -482,12 +560,18 @@ impl MlsGroup {
                     }
                 }
                 ReceivedMessage::Commit(description) => ProcessedMessage::Commit {
-                    // Absent when the committer removed themselves: by the time the
-                    // Commit is applied they are no longer on the roster.
+                    // Read once mls-rs has processed the Commit, from the leaf
+                    // it was sent from, which is still the committer's: mls-rs
+                    // refuses a Commit removing its own committer, and lets a
+                    // member's leaf pass to nobody else, see `valid_successor`
+                    // in `pinning_provider.rs`.
                     committer_user_uuid: Self::member_uuid(group, description.committer),
                     epoch: group.current_epoch(),
                     removed_self: matches!(description.effect, CommitEffect::Removed { .. }),
                 },
+                ReceivedMessage::Proposal(_) if allowed_committer.is_some() => {
+                    return Err(MlsError::UnauthorizedChange);
+                }
                 ReceivedMessage::Proposal(description) => ProcessedMessage::Proposal {
                     sender_user_uuid: match description.sender {
                         mls_rs::group::ProposalSender::Member(index) => {
@@ -592,8 +676,10 @@ impl MlsGroup {
     pub fn apply_pending_commit(&self) -> Result<(), MlsError> {
         let mut group = self.locked()?;
 
+        let members_before = member_count(&group);
+
         group.apply_pending_commit()?;
-        group.write_to_storage()?;
+        store_applied(&mut group, members_before)?;
 
         Ok(())
     }
@@ -610,7 +696,16 @@ impl MlsGroup {
         let mut group = self.locked()?;
 
         group.clear_pending_commit();
-        group.write_to_storage()?;
+
+        // As building the Commit was, which this ends. Building it took the
+        // key the Commit is encrypted with, a few hundred bytes the group
+        // keeps, and held to what it may store at rest, a group as full as it
+        // may be would keep its Commit pending for good. It may then be past
+        // that by as much, and refuse what it would store at rest until its
+        // next Commit is applied.
+        let member_count = member_count(&group);
+
+        store_within(&mut group, Allowance::BuildingCommit(member_count))?;
 
         Ok(())
     }
@@ -651,6 +746,7 @@ impl MlsGroup {
         let mut group = self.locked()?;
 
         let before = group.clone();
+        let members_before = member_count(&group);
 
         let value = match change(&mut group) {
             Ok(value) => value,
@@ -661,7 +757,9 @@ impl MlsGroup {
             }
         };
 
-        match group.write_to_storage().map_err(MlsError::from) {
+        // A message read changes no member, and a Commit applied is stored
+        // as the larger group, the one it ends or the one it makes.
+        match store_applied(&mut group, members_before) {
             Ok(()) => Ok(value),
             Err(error) => {
                 // Refused before anything was written.
@@ -712,12 +810,70 @@ impl MlsGroup {
     }
 
     /// Resolves a leaf index to the user UUID at that position, if anyone is
-    /// still there.
+    /// there.
     fn member_uuid(group: &Group<DuckCountMlsConfig>, index: u32) -> Option<String> {
         group
             .member_at_index(index)
             .and_then(|member| user_uuid_from(&member.signing_identity.credential).ok())
     }
+}
+
+/// Stores `group` at rest, holding it to what a group of the members it has
+/// may store but as it builds a Commit, see
+/// [`max_group_state_len_at_rest`](crate::cryptography::mls::storage::group_state::max_group_state_len_at_rest).
+///
+/// A group holding a pending Commit is held to it too, the Commit included:
+/// an addition many times the group's size, or any Commit of a large group,
+/// may leave no room for what reading or sending a message stores meanwhile,
+/// which is then refused until the Commit is applied or discarded.
+///
+/// # Errors
+///
+/// * `MlsError::GroupStateTooLarge` - If the group is past what it may store.
+/// * `MlsError::StorageFailed` - If the host storage fails.
+pub(crate) fn store(group: &mut Group<DuckCountMlsConfig>) -> Result<(), MlsError> {
+    let member_count = member_count(group);
+
+    store_within(group, Allowance::AtRest(member_count))
+}
+
+/// Stores `group` at rest once a Commit was applied to it, or could have
+/// been, holding it to what the larger of the group of `members_before`
+/// members and the group it is now may store.
+///
+/// The record of the epoch a Commit ends goes with it, holding what the group
+/// took in as it was then, see
+/// [`max_group_state_len_at_rest`](crate::cryptography::mls::storage::group_state::max_group_state_len_at_rest).
+///
+/// # Errors
+///
+/// * `MlsError::GroupStateTooLarge` - If the group is past what it may store.
+/// * `MlsError::StorageFailed` - If the host storage fails.
+fn store_applied(
+    group: &mut Group<DuckCountMlsConfig>,
+    members_before: usize,
+) -> Result<(), MlsError> {
+    let member_count = members_before.max(member_count(group));
+
+    store_within(group, Allowance::AtRest(member_count))
+}
+
+/// Stores `group`, holding it to `allowance`.
+///
+/// # Errors
+///
+/// * `MlsError::GroupStateTooLarge` - If the group is past what it may store.
+/// * `MlsError::StorageFailed` - If the host storage fails.
+fn store_within(
+    group: &mut Group<DuckCountMlsConfig>,
+    allowance: Allowance,
+) -> Result<(), MlsError> {
+    with_allowance(allowance, || group.write_to_storage()).map_err(Into::into)
+}
+
+/// How many members `group` holds, in the epoch it is in.
+fn member_count(group: &Group<DuckCountMlsConfig>) -> usize {
+    group.roster().members_iter().count()
 }
 
 /// The members of `group` other than this user, with their signature keys,
