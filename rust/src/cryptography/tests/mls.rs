@@ -1002,6 +1002,248 @@ mod tests {
         );
     }
 
+    /// Creates a group the DuckCount API holds, owned by `creator`, holding
+    /// `joiner` and `others`, and joins `joiner` to it as a host joins a group
+    /// it was added to: pinning nobody.
+    ///
+    /// Returns the creator's group and the joiner's.
+    fn join_group_pinning_nobody(
+        creator: &TestUser,
+        joiner: &TestUser,
+        others: &[&TestUser],
+    ) -> (Arc<MlsGroup>, Arc<MlsGroup>) {
+        let group_uuid = new_group_uuid();
+
+        let creation = creator
+            .client
+            .create_group(
+                Some(group_uuid.clone()),
+                std::iter::once(joiner)
+                    .chain(others.iter().copied())
+                    .map(|user| user.invitation())
+                    .collect(),
+                None,
+            )
+            .unwrap();
+
+        let members = std::iter::once(creator)
+            .chain(others.iter().copied())
+            .collect::<Vec<_>>();
+
+        let group_id = joiner
+            .client
+            .join_group(creation.welcome, Some(group_uuid), uuids(&members), false)
+            .unwrap();
+
+        (
+            creator.client.load_group(creation.mls_group_id).unwrap(),
+            joiner.client.load_group(group_id).unwrap(),
+        )
+    }
+
+    /// A key package of a client of somebody else's making claiming to be
+    /// `user`, as a server substituting one would serve for them.
+    fn substituted_invitation(user: &TestUser) -> InviteeKeyPackage {
+        let impostor =
+            MlsClient::new(user.uuid.clone(), SECRET.to_vec(), TestStore::new()).unwrap();
+
+        assert_ne!(
+            impostor.signature_public_key(),
+            user.client.signature_public_key()
+        );
+
+        InviteeKeyPackage {
+            user_uuid: user.uuid.clone(),
+            key_package: impostor
+                .generate_key_packages(1)
+                .unwrap()
+                .one_time_key_packages
+                .remove(0),
+        }
+    }
+
+    #[test]
+    fn test_pinning_a_member_pins_the_key_they_hold_in_the_group_and_nobody_else() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol, &dave]);
+
+        bob_group.pin_member(carol.uuid.clone()).unwrap();
+
+        assert_eq!(
+            bob.client.pinned_signature_key(carol.uuid.clone()).unwrap(),
+            Some(carol.client.signature_public_key())
+        );
+
+        for member in [&alice, &dave] {
+            assert!(
+                bob.client
+                    .pinned_signature_key(member.uuid.clone())
+                    .unwrap()
+                    .is_none(),
+                "only the member named is pinned"
+            );
+        }
+
+        // Once pinned, the same key still passes.
+        bob_group.pin_member(carol.uuid.clone()).unwrap();
+    }
+
+    #[test]
+    fn test_a_member_the_creator_added_since_the_join_is_pinned_from_the_group() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let (alice_group, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        let addition = alice_group
+            .add_members(vec![dave.invitation()], None)
+            .unwrap();
+
+        bob_group
+            .process_incoming_message(addition.commit, Some(alice.uuid.clone()))
+            .unwrap();
+        accept(&alice_group);
+
+        bob_group.pin_member(dave.uuid.clone()).unwrap();
+
+        assert_eq!(
+            bob.client.pinned_signature_key(dave.uuid.clone()).unwrap(),
+            Some(dave.client.signature_public_key())
+        );
+    }
+
+    #[test]
+    fn test_a_contact_request_to_a_member_pinned_from_the_group_is_made_from_their_key_package() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        bob_group.pin_member(carol.uuid.clone()).unwrap();
+
+        let request = bob
+            .client
+            .create_group(None, vec![carol.invitation()], None)
+            .unwrap();
+
+        // And Carol opens it as any other request.
+        carol
+            .client
+            .join_group(request.welcome, None, uuids(&[&bob]), false)
+            .unwrap();
+
+        assert_eq!(
+            bob.client.pinned_signature_key(carol.uuid.clone()).unwrap(),
+            Some(carol.client.signature_public_key())
+        );
+    }
+
+    #[test]
+    fn test_a_contact_request_to_a_member_pinned_from_the_group_refuses_anybody_else_s_key_package()
+    {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        bob_group.pin_member(carol.uuid.clone()).unwrap();
+
+        let error = bob
+            .client
+            .create_group(None, vec![substituted_invitation(&carol)], None)
+            .expect_err("a key package not of the key Carol holds in the group must be refused");
+
+        assert!(matches!(error, MlsError::IdentityKeyMismatch(uuid) if uuid == carol.uuid));
+
+        assert_eq!(
+            bob.client.pinned_signature_key(carol.uuid.clone()).unwrap(),
+            Some(carol.client.signature_public_key()),
+            "the key from the group stays pinned"
+        );
+    }
+
+    #[test]
+    fn test_pinning_somebody_outside_the_group_as_a_member_is_refused_and_pins_nobody() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let stranger = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        assert!(matches!(
+            bob_group.pin_member(stranger.uuid.clone()).unwrap_err(),
+            MlsError::UnexpectedMembers
+        ));
+
+        for user in [&stranger, &alice, &carol] {
+            assert!(
+                bob.client
+                    .pinned_signature_key(user.uuid.clone())
+                    .unwrap()
+                    .is_none(),
+                "nobody is pinned for a member the group does not hold"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pinning_this_user_as_a_member_is_refused_and_pins_nobody() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        assert!(matches!(
+            bob_group.pin_member(bob.uuid.clone()).unwrap_err(),
+            MlsError::UnexpectedMembers
+        ));
+
+        for user in [&bob, &alice, &carol] {
+            assert!(
+                bob.client
+                    .pinned_signature_key(user.uuid.clone())
+                    .unwrap()
+                    .is_none(),
+                "this user is not one of the members to pin"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pinning_a_member_refuses_a_key_pinned_differently_since_the_join() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let impostor = TestUser::new();
+
+        let (_, bob_group) = join_group_pinning_nobody(&alice, &bob, &[&carol]);
+
+        bob.client
+            .pin_identity(carol.uuid.clone(), impostor.client.signature_public_key())
+            .unwrap();
+
+        assert!(matches!(
+            bob_group.pin_member(carol.uuid.clone()).unwrap_err(),
+            MlsError::IdentityKeyMismatch(uuid) if uuid == carol.uuid
+        ));
+
+        // The pin that was there stays as it was.
+        assert_eq!(
+            bob.client.pinned_signature_key(carol.uuid.clone()).unwrap(),
+            Some(impostor.client.signature_public_key())
+        );
+    }
+
     /// Whether `receiver` reads a message from `sender` as signed with the key
     /// pinned for them.
     fn reads_as_pinned(sender: &MlsGroup, receiver: &MlsGroup) -> bool {

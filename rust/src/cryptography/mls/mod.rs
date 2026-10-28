@@ -109,7 +109,8 @@ pub enum MlsError {
     /// the id of another group, or one no client of this library derives.
     UnexpectedGroupId,
     /// A group, one a Welcome is for or one already joined, holds members
-    /// other than exactly this user and the ones the host expected, or a
+    /// other than exactly this user and the ones the host expected, or does
+    /// not hold, besides this user, the one member the host named, or a
     /// Commit adding members would add somebody another member proposed too.
     UnexpectedMembers,
     /// A group would hold more than [`MAX_GROUP_MEMBERS`] members: one being

@@ -149,6 +149,75 @@ impl MlsGroup {
         pin_peers(&self.pins, &expected_peers(&group, expected_members)?)
     }
 
+    /// Pins to `user_uuid` the signature key they hold in this group, and
+    /// nobody else.
+    ///
+    /// This is the host taking the group's word for one of its members, in a
+    /// group the DuckCount API holds: before it sends a contact request to a
+    /// member who is not a contact, so that the key package the server serves
+    /// for them is checked against this key by [`MlsClient::create_group`],
+    /// and refused if it carries another.
+    ///
+    /// The group's word is worth more than that key package, which the server
+    /// serves on nobody's word but its own, because it is its creator's, and
+    /// this device trusts them. The host joins such a group only from a
+    /// Welcome its creator wrote, once it has pinned them, their leaf in it
+    /// checked against that pin, see [`MlsClient::join_group`], so the tree it
+    /// opens is the creator's word. Every change to its members since is a
+    /// Commit of theirs, its members refusing anybody else's and every
+    /// Proposal, see [`process_incoming_message`](Self::process_incoming_message).
+    /// And the creator's host seats only contacts it has pinned, each checked
+    /// against that pin as [`MlsClient::create_group`] or
+    /// [`add_members`](Self::add_members) adds them. Both pin anybody not
+    /// pinned yet from whichever key package the server served, and a member
+    /// seated that way would hold a key resting on the server's word alone,
+    /// which is why a host never seats one. The key a member holds in a group
+    /// this device joined is the one its creator vouched for.
+    ///
+    /// It pins, and does not just check: the key stays pinned even if the
+    /// request then fails. A pin is what every later appearance of theirs is
+    /// checked against, a key package, a Welcome or Commit seating them, or
+    /// their acceptance; it also makes a message of theirs read as from a
+    /// pinned sender, and their safety number is made from it. Left behind,
+    /// this one is harmless: it is the key their creator vouched for, and the
+    /// one a request that went out would have left pinned,
+    /// [`MlsClient::create_group`] pinning its invitees. They are then pinned
+    /// as anybody the user sent a request to is, before they answer it, and
+    /// the host goes by what they are to the user, not by the pin. A key
+    /// already pinned for them is checked instead, and left as it was.
+    ///
+    /// [`MlsClient::join_group`]: crate::cryptography::mls::client::MlsClient::join_group
+    /// [`MlsClient::create_group`]: crate::cryptography::mls::client::MlsClient::create_group
+    ///
+    /// # Arguments
+    ///
+    /// * `user_uuid` - The member's UUID, in canonical hyphenated lowercase
+    ///   form.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::UnexpectedMembers` - If no member of the group but this
+    ///   user holds `user_uuid`, which is the case when it is this user's own.
+    ///   Nobody is pinned.
+    /// * `MlsError::IdentityKeyMismatch` - If a different key is pinned for
+    ///   them already. It stays pinned.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+    pub fn pin_member(&self, user_uuid: String) -> Result<(), MlsError> {
+        let group = self.locked()?;
+
+        // The one leaf holding it, if any: mls-rs refuses a tree in which two
+        // leaves share an identity.
+        let (_, signature_key) = peers(&group)?
+            .into_iter()
+            .find(|(peer_uuid, _)| *peer_uuid == user_uuid)
+            .ok_or(MlsError::UnexpectedMembers)?;
+
+        self.pins.verify_or_pin(&user_uuid, signature_key.as_ref())
+    }
+
     /// Checks each of `expected_members` against the key pinned for them, if
     /// any, provided the group still holds exactly this user and them. Pins
     /// nobody.
@@ -720,8 +789,9 @@ impl std::fmt::Debug for MlsGroup {
 }
 
 impl MlsGroup {
-    /// Wraps a loaded mls-rs group. `pins` is where [`add_members`](Self::add_members)
-    /// and [`pin_members`](Self::pin_members) record the keys they pin.
+    /// Wraps a loaded mls-rs group. `pins` is where [`add_members`](Self::add_members),
+    /// [`pin_members`](Self::pin_members) and [`pin_member`](Self::pin_member)
+    /// record the keys they pin.
     pub(crate) fn new(group: Group<DuckCountMlsConfig>, pins: IdentityPinStore) -> Self {
         MlsGroup {
             group: Mutex::new(group),

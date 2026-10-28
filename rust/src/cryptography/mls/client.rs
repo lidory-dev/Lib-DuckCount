@@ -463,7 +463,8 @@ impl MlsClient {
     /// only pinned when `pin_members` says the host already trusts them. A
     /// Welcome read to find out who sent it, and then refused, must not decide
     /// who anybody is: the host pins those with [`MlsGroup::pin_members`] once
-    /// it trusts them.
+    /// it trusts them, or, in a group the DuckCount API holds, any one of them
+    /// with [`MlsGroup::pin_member`], on the word of its creator.
     ///
     /// A Welcome for a group of more than [`MAX_GROUP_MEMBERS`] members is
     /// refused as well, whoever wrote it, before anything is stored or pinned.

@@ -26,9 +26,15 @@
 //!
 //! Pins are written instead once mls-rs has validated everything, and only
 //! for the users the host chose: the invitees it fetched key packages for,
-//! and the members of a group it joined once it trusts them, at the join or
+//! the members of a group it joined once it trusts them, at the join or
 //! later with
-//! [`MlsGroup::pin_members`](crate::cryptography::mls::group::MlsGroup::pin_members).
+//! [`MlsGroup::pin_members`](crate::cryptography::mls::group::MlsGroup::pin_members),
+//! and a member of a group the DuckCount API holds, one at a time with
+//! [`MlsGroup::pin_member`](crate::cryptography::mls::group::MlsGroup::pin_member).
+//! That tree's word is taken, unlike any other's, because its author is
+//! somebody this device trusts: the group's creator, whom the host pinned
+//! before joining from their Welcome, and the one member whose Commits
+//! change who is in it.
 
 use mls_rs::ExtensionList;
 use mls_rs::identity::{CredentialType, SigningIdentity};
