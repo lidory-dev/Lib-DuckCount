@@ -91,7 +91,8 @@ pub fn mls_rules() -> DuckCountMlsRules {
         // delivers once to each of them. This is the mls-rs default; it is set
         // explicitly because a Welcome per member carries the whole ratchet
         // tree each time, some 15 MB of Welcomes for a group of a hundred,
-        // where the one Welcome is under 300 KB.
+        // where the one Welcome is some 280 KB, 370 KB in the Base64 the API
+        // is handed it in.
         .with_single_welcome_message(true)
         // An add-only commit may skip the update path under RFC 9420. Requiring
         // it costs one extra public key operation per commit in groups this

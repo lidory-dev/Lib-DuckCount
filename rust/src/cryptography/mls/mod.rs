@@ -52,8 +52,11 @@ pub const CIPHER_SUITE: CipherSuite = CipherSuite::ML_KEM_768_X25519;
 /// and joined in some 300 KB of state, to which a pending Commit adds up to
 /// some 830 KB, both within the most a group of a hundred may store (see
 /// `max_group_state_len_at_rest` and `max_group_state_len` in
-/// `storage/group_state.rs`), and its one Welcome is about 300 KB. The DuckCount API refuses a larger group too, and the two
-/// change together; a Welcome for one is refused on joining, whoever wrote it.
+/// `storage/group_state.rs`). Its one Welcome is some 280 KB, which the
+/// DuckCount API is handed in Base64, some 370 KB, within the cap it holds a
+/// Welcome to, see `tests/wire_sizes.rs`. The API refuses a larger group too,
+/// and the two change together; a Welcome for one is refused on joining,
+/// whoever wrote it.
 pub const MAX_GROUP_MEMBERS: usize = 100;
 
 /// Exposes [`MAX_GROUP_MEMBERS`] to the foreign bindings so clients can show the
