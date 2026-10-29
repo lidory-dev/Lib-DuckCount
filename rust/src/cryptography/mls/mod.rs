@@ -23,10 +23,12 @@ pub mod client;
 pub mod config;
 pub mod group;
 pub mod group_id;
+pub mod group_information;
 pub mod identity;
 pub mod invitation;
 pub mod key_package;
 pub mod one_time_expense;
+pub mod sign_content;
 pub mod storage;
 pub mod types;
 

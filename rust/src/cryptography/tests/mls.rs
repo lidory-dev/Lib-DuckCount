@@ -27,6 +27,7 @@ mod tests {
     use crate::cryptography::mls::group_id::{
         CHANNEL_NONCE_EXTENSION, channel_group_id, server_group_id,
     };
+    use crate::cryptography::mls::group_information::{GroupInformation, verify_group_information};
     use crate::cryptography::mls::identity::fingerprint::safety_number;
     use crate::cryptography::mls::one_time_expense::{
         OneTimeExpenseManifest, SealedValue, verify_one_time_expense,
@@ -3604,6 +3605,31 @@ mod tests {
             alice.uuid.clone(),
             alice.client.signature_public_key(),
             manifest,
+            signature,
+        ));
+    }
+
+    #[test]
+    fn test_a_client_signs_group_information_with_the_key_its_peers_pin() {
+        let alice = TestUser::new();
+
+        let information = GroupInformation {
+            group_uuid: new_group_uuid(),
+            revision: 1,
+            title: "Flatmates".to_string(),
+            description: "Rent and groceries".to_string(),
+            currency_uuid: Uuid::new_v4().to_string(),
+        };
+
+        let signature = alice
+            .client
+            .sign_group_information(information.clone())
+            .unwrap();
+
+        assert!(verify_group_information(
+            alice.uuid.clone(),
+            alice.client.signature_public_key(),
+            information,
             signature,
         ));
     }

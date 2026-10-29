@@ -12,6 +12,7 @@ use crate::cryptography::mls::{
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
     group::{MlsGroup, expected_peers, peers, pin_peers, store},
     group_id::{self, new_mls_group_id},
+    group_information::{self, GroupInformation},
     identity::{
         credential::{credential_for, user_uuid_from},
         fingerprint::safety_number,
@@ -202,6 +203,27 @@ impl MlsClient {
         mark: OneTimeExpenseSettledMark,
     ) -> Result<Vec<u8>, MlsError> {
         one_time_expense::sign_settled_mark(&self.signature_key_pair.secret, &self.user_uuid, mark)
+    }
+
+    /// Signs one version of the information of a group this user owns.
+    ///
+    /// See [`group_information`] for what the signature covers, and
+    /// [`verify_group_information`](group_information::verify_group_information)
+    /// for checking it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::ProtocolFailed` - If the information cannot be encoded or
+    ///   signed.
+    pub fn sign_group_information(
+        &self,
+        information: GroupInformation,
+    ) -> Result<Vec<u8>, MlsError> {
+        group_information::sign(
+            &self.signature_key_pair.secret,
+            &self.user_uuid,
+            information,
+        )
     }
 
     /// Generates key packages to publish so peers can add this user to groups

@@ -15,10 +15,10 @@
 //!
 //! # Domain separation
 //!
-//! The identity key also signs MLS messages. The signed bytes are MLS's own
-//! `SignContent` (RFC 9420, section 5.1.2) with a label of this crate's, and
-//! every MLS label starts with "MLS 1.0 ", which this one does not, so neither
-//! kind of signature can be passed off as the other.
+//! The identity key also signs MLS messages, and the information of the groups
+//! its user owns. A version is signed as [`sign_content`] describes, under a
+//! label of its own, so that no other kind of signature can be passed off as a
+//! version's, or a version's as one of another kind.
 //!
 //! # Settled marks
 //!
@@ -28,17 +28,19 @@
 //! a label of its own, so that a version's signature cannot be passed off as a
 //! mark's or the other way round.
 
-use mls_rs::CipherSuiteProvider;
 use mls_rs_codec::{MlsEncode, MlsSize};
-use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
+use mls_rs_core::crypto::SignatureSecretKey;
 
-use crate::cryptography::mls::{MlsError, config::cipher_suite_provider};
+use crate::cryptography::mls::{
+    MlsError,
+    sign_content::{self, labelled},
+};
 
 /// The `SignContent` label of a one-time expense signature.
-const LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpense";
+pub(crate) const LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpense";
 
 /// The `SignContent` label of a settled mark's signature.
-const SETTLED_MARK_LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpenseSettledMark";
+pub(crate) const SETTLED_MARK_LABEL: &[u8] = b"DuckCount 1.0 OneTimeExpenseSettledMark";
 
 /// One sealed field, as the server stores it.
 #[derive(uniffi::Record, MlsSize, MlsEncode, Clone)]
@@ -107,7 +109,7 @@ pub fn verify_one_time_expense(
         return false;
     };
 
-    verifies(creditor_signature_key, &signature, &signed)
+    sign_content::verifies(creditor_signature_key, &signature, &signed)
 }
 
 /// Whether `signature` is `creditor_uuid`'s signature over `mark`, made with
@@ -130,7 +132,7 @@ pub fn verify_one_time_expense_settled_mark(
         return false;
     };
 
-    verifies(creditor_signature_key, &signature, &signed)
+    sign_content::verifies(creditor_signature_key, &signature, &signed)
 }
 
 /// Signs `manifest` as `creditor_uuid`, whose MLS signature private key is
@@ -147,7 +149,7 @@ pub(crate) fn sign(
     let signed = to_be_signed(creditor_uuid, manifest)
         .map_err(|error| MlsError::ProtocolFailed(error.to_string()))?;
 
-    signs(secret_key, &signed)
+    sign_content::sign(secret_key, &signed)
 }
 
 /// Signs `mark` as `creditor_uuid`, whose MLS signature private key is
@@ -164,23 +166,7 @@ pub(crate) fn sign_settled_mark(
     let signed = labelled(SETTLED_MARK_LABEL, creditor_uuid, &mark)
         .map_err(|error| MlsError::ProtocolFailed(error.to_string()))?;
 
-    signs(secret_key, &signed)
-}
-
-fn signs(secret_key: &SignatureSecretKey, signed: &[u8]) -> Result<Vec<u8>, MlsError> {
-    cipher_suite_provider()?
-        .sign(secret_key, signed)
-        .map_err(|error| MlsError::ProtocolFailed(error.to_string()))
-}
-
-fn verifies(signature_key: Vec<u8>, signature: &[u8], signed: &[u8]) -> bool {
-    let Ok(cipher_suite_provider) = cipher_suite_provider() else {
-        return false;
-    };
-
-    cipher_suite_provider
-        .verify(&SignaturePublicKey::new(signature_key), signature, signed)
-        .is_ok()
+    sign_content::sign(secret_key, &signed)
 }
 
 /// The bytes a signature is made over: the creditor and the manifest, with the
@@ -194,27 +180,4 @@ fn to_be_signed(
         .sort_by(|first, second| first.user_uuid.cmp(&second.user_uuid));
 
     labelled(LABEL, creditor_uuid, &manifest)
-}
-
-/// The creditor and `signed`, wrapped in a `SignContent` labelled `label`.
-fn labelled(
-    label: &[u8],
-    creditor_uuid: &str,
-    signed: &impl MlsEncode,
-) -> Result<Vec<u8>, mls_rs_codec::Error> {
-    let mut content = creditor_uuid.mls_encode_to_vec()?;
-    signed.mls_encode(&mut content)?;
-
-    SignContent {
-        label: label.to_vec(),
-        content,
-    }
-    .mls_encode_to_vec()
-}
-
-/// `SignContent` from RFC 9420, section 5.1.2.
-#[derive(MlsSize, MlsEncode)]
-struct SignContent {
-    label: Vec<u8>,
-    content: Vec<u8>,
 }
