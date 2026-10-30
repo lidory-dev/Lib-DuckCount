@@ -1,7 +1,8 @@
 //! The UUID of what a client creates on the DuckCount API, derived rather than
 //! chosen: a one-time expense's, see
-//! [`one_time_expense_id`](crate::cryptography::one_time_expense_id), and a
-//! group's, see [`group_uuid`](crate::cryptography::group_uuid).
+//! [`one_time_expense_id`](crate::cryptography::one_time_expense_id), a
+//! group's, see [`group_uuid`](crate::cryptography::group_uuid), and a group
+//! expense's, see [`group_expense_id`](crate::cryptography::group_expense_id).
 //!
 //! The creator's device has to know the UUID before posting: what it posts
 //! along with it names it. Letting the device pick the UUID would let a client

@@ -1,9 +1,10 @@
 //! Signatures over what is not an MLS message.
 //!
 //! A user's MLS identity key signs more than MLS messages: each version of a
-//! one-time expense they are the creditor of, see [`one_time_expense`], and
-//! each version of the information of a group they own, see
-//! [`group_information`]. Every such signature is made the same way, over
+//! one-time expense they are the creditor of, see [`one_time_expense`], each
+//! version of the information of a group they own, see
+//! [`group_information`], and each version of a group expense they write, see
+//! [`group_expense`]. Every such signature is made the same way, over
 //! MLS's own `SignContent` (RFC 9420, section 5.1.2), holding a label of its
 //! kind's and, ahead of what is signed, the UUID of the user signing it.
 //!
@@ -15,6 +16,7 @@
 //!
 //! [`one_time_expense`]: super::one_time_expense
 //! [`group_information`]: super::group_information
+//! [`group_expense`]: super::group_expense
 
 use mls_rs::CipherSuiteProvider;
 use mls_rs_codec::{MlsEncode, MlsSize};

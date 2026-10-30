@@ -15,10 +15,11 @@
 //!
 //! # Domain separation
 //!
-//! The identity key also signs MLS messages, and the information of the groups
-//! its user owns. A version is signed as [`sign_content`] describes, under a
-//! label of its own, so that no other kind of signature can be passed off as a
-//! version's, or a version's as one of another kind.
+//! The identity key also signs MLS messages, the information of the groups its
+//! user owns and the group expenses they write. A version is signed as
+//! [`sign_content`] describes, under a label of its own, so that no other kind
+//! of signature can be passed off as a version's, or a version's as one of
+//! another kind.
 //!
 //! # Settled marks
 //!

@@ -29,10 +29,10 @@
 //!
 //! # Domain separation
 //!
-//! The identity key also signs MLS messages, and one-time expenses. A version
-//! is signed as [`sign_content`] describes, under a label of its own, so that
-//! no other kind of signature can be passed off as a version's, or a version's
-//! as one of another kind.
+//! The identity key also signs MLS messages, one-time expenses and group
+//! expenses. A version is signed as [`sign_content`] describes, under a label
+//! of its own, so that no other kind of signature can be passed off as a
+//! version's, or a version's as one of another kind.
 
 use mls_rs_codec::{MlsEncode, MlsSize};
 use mls_rs_core::crypto::SignatureSecretKey;

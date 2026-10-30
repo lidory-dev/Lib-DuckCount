@@ -11,6 +11,7 @@ use crate::cryptography::mls::{
     MAX_GROUP_MEMBERS, MlsError,
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
     group::{MlsGroup, expected_peers, peers, pin_peers, store},
+    group_expense::{self, GroupExpenseVersion},
     group_id::{self, new_mls_group_id},
     group_information::{self, GroupInformation},
     identity::{
@@ -224,6 +225,22 @@ impl MlsClient {
             &self.user_uuid,
             information,
         )
+    }
+
+    /// Signs one version of a group expense this user writes, be it the
+    /// expense's creation, an edit, its deletion or its restoring. A
+    /// settlement's verifies only when this user is the member it was paid to.
+    ///
+    /// See [`group_expense`] for what the signature covers, and
+    /// [`verify_group_expense`](group_expense::verify_group_expense) for
+    /// checking it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::ProtocolFailed` - If the version cannot be encoded or
+    ///   signed.
+    pub fn sign_group_expense(&self, version: GroupExpenseVersion) -> Result<Vec<u8>, MlsError> {
+        group_expense::sign(&self.signature_key_pair.secret, &self.user_uuid, version)
     }
 
     /// Generates key packages to publish so peers can add this user to groups

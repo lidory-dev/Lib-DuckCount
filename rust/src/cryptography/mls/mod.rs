@@ -22,6 +22,7 @@
 pub mod client;
 pub mod config;
 pub mod group;
+pub mod group_expense;
 pub mod group_id;
 pub mod group_information;
 pub mod identity;

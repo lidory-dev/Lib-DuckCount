@@ -24,6 +24,9 @@ mod tests {
     use crate::cryptography::mls::client::MlsClient;
     use crate::cryptography::mls::config::{KEY_PACKAGE_LIFETIME, mls_rules};
     use crate::cryptography::mls::group::MlsGroup;
+    use crate::cryptography::mls::group_expense::{
+        GroupExpenseBeneficiary, GroupExpenseVersion, verify_group_expense,
+    };
     use crate::cryptography::mls::group_id::{
         CHANNEL_NONCE_EXTENSION, channel_group_id, server_group_id,
     };
@@ -3634,6 +3637,88 @@ mod tests {
         ));
     }
 
+    /// A version of a group expense written by `author`, in `group_uuid`.
+    fn group_expense_version(group_uuid: &str, author: &TestUser) -> GroupExpenseVersion {
+        GroupExpenseVersion {
+            group_uuid: group_uuid.to_string(),
+            expense_uuid: Uuid::new_v4().to_string(),
+            revision: 1,
+            title: "Groceries".to_string(),
+            description: String::new(),
+            amount: "42.00".to_string(),
+            timestamp: "2026-10-30T09:00:00Z".to_string(),
+            creditor_uuid: author.uuid.clone(),
+            beneficiaries: vec![GroupExpenseBeneficiary {
+                user_uuid: author.uuid.clone(),
+                share: "42.00".to_string(),
+                is_share_fixed: false,
+            }],
+            is_settlement: false,
+            is_deleted: false,
+        }
+    }
+
+    #[test]
+    fn test_a_client_signs_a_group_expense_with_the_key_its_peers_pin() {
+        let alice = TestUser::new();
+
+        let version = group_expense_version(&new_group_uuid(), &alice);
+
+        let signature = alice.client.sign_group_expense(version.clone()).unwrap();
+
+        assert!(verify_group_expense(
+            version,
+            alice.uuid.clone(),
+            alice.client.signature_public_key(),
+            signature,
+        ));
+    }
+
+    /// The key the group's tree holds for a member, as [`MlsGroup::members`]
+    /// reports it, is one their group expenses check out under: what a reader
+    /// goes by for a member who is no contact of theirs.
+    #[test]
+    fn test_a_group_expense_verifies_under_the_key_the_group_holds_for_its_author() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+
+        let version = group_expense_version(&group_uuid, &bob);
+        let signature = bob.client.sign_group_expense(version.clone()).unwrap();
+
+        let as_carol_holds_bob = groups[2]
+            .members()
+            .unwrap()
+            .into_iter()
+            .find(|member| member.user_uuid == bob.uuid)
+            .unwrap();
+
+        assert!(verify_group_expense(
+            version.clone(),
+            bob.uuid.clone(),
+            as_carol_holds_bob.signature_key,
+            signature.clone(),
+        ));
+
+        // Nor does it pass for Alice's, under the key the group holds for her.
+        let as_carol_holds_alice = groups[2]
+            .members()
+            .unwrap()
+            .into_iter()
+            .find(|member| member.user_uuid == alice.uuid)
+            .unwrap();
+
+        assert!(!verify_group_expense(
+            version,
+            alice.uuid.clone(),
+            as_carol_holds_alice.signature_key,
+            signature,
+        ));
+    }
+
     #[test]
     fn test_only_the_last_resort_key_package_is_marked_as_such() {
         let alice = TestUser::new();
@@ -4173,6 +4258,31 @@ mod tests {
             alice.client.safety_number(bob.uuid.clone()).unwrap(),
             as_bob_sees_it
         );
+    }
+
+    #[test]
+    fn test_every_member_is_reported_with_the_signature_key_their_leaf_holds() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let users = [&alice, &bob, &carol];
+        let groups = establish_group(&alice, &[&bob, &carol]);
+
+        for group in &groups {
+            let members = group.members().unwrap();
+
+            assert_eq!(members.len(), users.len());
+
+            for user in users {
+                let member = members
+                    .iter()
+                    .find(|member| member.user_uuid == user.uuid)
+                    .unwrap();
+
+                assert_eq!(member.signature_key, user.client.signature_public_key());
+            }
+        }
     }
 
     #[test]

@@ -93,6 +93,15 @@ pub struct MemberInfo {
     /// half of every safety number they are part of, see
     /// [`safety_number`](crate::cryptography::mls::identity::fingerprint::safety_number).
     pub fingerprint: String,
+    /// The member's MLS signature public key, as their leaf in this group
+    /// holds it.
+    ///
+    /// A group expense the member wrote is checked under it when no better key
+    /// is held for them, the user's own or the one pinned for a contact, see
+    /// [`group_expense`](crate::cryptography::mls::group_expense). The host
+    /// is to keep it once they have left, since what they wrote while in the
+    /// group stays in it.
+    pub signature_key: Vec<u8>,
 }
 
 /// What processing an incoming message produced.

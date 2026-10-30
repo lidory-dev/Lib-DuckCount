@@ -1,6 +1,7 @@
 pub mod authentication;
 pub mod derived_uuid;
 pub mod encryption;
+pub mod group_expense_id;
 pub mod group_uuid;
 mod hashing;
 pub mod mls;

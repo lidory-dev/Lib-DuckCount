@@ -110,13 +110,12 @@ impl MlsGroup {
             .iter()
             .map(|member| {
                 let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+                let signature_key = member.signing_identity.signature_key.to_vec();
 
                 Ok(MemberInfo {
-                    fingerprint: fingerprint(
-                        &user_uuid,
-                        member.signing_identity.signature_key.as_ref(),
-                    ),
+                    fingerprint: fingerprint(&user_uuid, &signature_key),
                     user_uuid,
+                    signature_key,
                 })
             })
             .collect()

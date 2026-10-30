@@ -1,6 +1,8 @@
 mod authentication;
 mod encryption;
 mod fingerprint;
+mod group_expense;
+mod group_expense_id;
 mod group_information;
 mod group_uuid;
 mod keys;
