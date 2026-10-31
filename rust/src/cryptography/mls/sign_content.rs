@@ -3,10 +3,11 @@
 //! A user's MLS identity key signs more than MLS messages: each version of a
 //! one-time expense they are the creditor of, see [`one_time_expense`], each
 //! version of the information of a group they own, see
-//! [`group_information`], and each version of a group expense they write, see
-//! [`group_expense`]. Every such signature is made the same way, over
-//! MLS's own `SignContent` (RFC 9420, section 5.1.2), holding a label of its
-//! kind's and, ahead of what is signed, the UUID of the user signing it.
+//! [`group_information`], and each version of a group expense they write and
+//! each flag deleting or restoring one, see [`group_expense`]. Every such
+//! signature is made the same way, over MLS's own `SignContent` (RFC 9420,
+//! section 5.1.2), holding a label of its kind's and, ahead of what is
+//! signed, the UUID of the user signing it.
 //!
 //! Every MLS label starts with "MLS 1.0 ", which none of this crate's does, and
 //! no two of this crate's are the same, so a signature of one kind cannot be

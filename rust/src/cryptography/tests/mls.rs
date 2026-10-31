@@ -25,7 +25,8 @@ mod tests {
     use crate::cryptography::mls::config::{KEY_PACKAGE_LIFETIME, mls_rules};
     use crate::cryptography::mls::group::MlsGroup;
     use crate::cryptography::mls::group_expense::{
-        GroupExpenseBeneficiary, GroupExpenseVersion, verify_group_expense,
+        GroupExpenseBeneficiary, GroupExpenseDeletion, GroupExpenseVersion, verify_group_expense,
+        verify_group_expense_deletion,
     };
     use crate::cryptography::mls::group_id::{
         CHANNEL_NONCE_EXTENSION, channel_group_id, server_group_id,
@@ -4300,7 +4301,6 @@ mod tests {
                 is_share_fixed: false,
             }],
             is_settlement: false,
-            is_deleted: false,
         }
     }
 
@@ -4313,6 +4313,33 @@ mod tests {
         let signature = alice.client.sign_group_expense(version.clone()).unwrap();
 
         assert!(verify_group_expense(
+            version,
+            alice.uuid.clone(),
+            alice.client.signature_public_key(),
+            signature,
+        ));
+    }
+
+    #[test]
+    fn test_a_client_signs_a_group_expense_deletion_with_the_key_its_peers_pin() {
+        let alice = TestUser::new();
+
+        let version = group_expense_version(&new_group_uuid(), &alice);
+
+        let deletion = GroupExpenseDeletion {
+            group_uuid: version.group_uuid.clone(),
+            expense_uuid: version.expense_uuid.clone(),
+            deletion_revision: 1,
+            is_deleted: true,
+        };
+
+        let signature = alice
+            .client
+            .sign_group_expense_deletion(deletion.clone())
+            .unwrap();
+
+        assert!(verify_group_expense_deletion(
+            deletion,
             version,
             alice.uuid.clone(),
             alice.client.signature_public_key(),

@@ -11,7 +11,7 @@ use crate::cryptography::mls::{
     MAX_GROUP_MEMBERS, MlsError,
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
     group::{MlsGroup, expected_peers, peers, pin_peers, store},
-    group_expense::{self, GroupExpenseVersion},
+    group_expense::{self, GroupExpenseDeletion, GroupExpenseVersion},
     group_id::{self, new_mls_group_id},
     group_information::{self, GroupInformation},
     identity::{
@@ -228,8 +228,9 @@ impl MlsClient {
     }
 
     /// Signs one version of a group expense this user writes, be it the
-    /// expense's creation, an edit, its deletion or its restoring. A
-    /// settlement's verifies only when this user is the member it was paid to.
+    /// expense's creation or an edit. A settlement's verifies only when this
+    /// user is the member it was paid to and the version is its creation, a
+    /// settlement being never edited.
     ///
     /// See [`group_expense`] for what the signature covers, and
     /// [`verify_group_expense`](group_expense::verify_group_expense) for
@@ -241,6 +242,24 @@ impl MlsClient {
     ///   signed.
     pub fn sign_group_expense(&self, version: GroupExpenseVersion) -> Result<Vec<u8>, MlsError> {
         group_expense::sign(&self.signature_key_pair.secret, &self.user_uuid, version)
+    }
+
+    /// Signs the flag saying whether a group expense is deleted, as this user
+    /// deletes or restores it. A settlement's verifies only when this user is
+    /// the member it was paid to and the flag deletes it.
+    ///
+    /// See [`GroupExpenseDeletion`] for what it covers, and
+    /// [`verify_group_expense_deletion`](group_expense::verify_group_expense_deletion)
+    /// for checking it.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::ProtocolFailed` - If the flag cannot be encoded or signed.
+    pub fn sign_group_expense_deletion(
+        &self,
+        deletion: GroupExpenseDeletion,
+    ) -> Result<Vec<u8>, MlsError> {
+        group_expense::sign_deletion(&self.signature_key_pair.secret, &self.user_uuid, deletion)
     }
 
     /// Generates key packages to publish so peers can add this user to groups

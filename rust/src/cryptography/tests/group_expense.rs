@@ -12,7 +12,8 @@ mod tests {
     use crate::cryptography::encryption::keys::generate_symmetric_encryption_key;
     use crate::cryptography::mls::config::generate_signature_key_pair;
     use crate::cryptography::mls::group_expense::{
-        self, GroupExpenseBeneficiary, GroupExpenseVersion, sign, verify_group_expense,
+        self, GroupExpenseBeneficiary, GroupExpenseDeletion, GroupExpenseVersion, sign,
+        sign_deletion, verify_group_expense, verify_group_expense_deletion,
     };
     use crate::cryptography::mls::group_information::{self, GroupInformation};
     use crate::cryptography::mls::one_time_expense::{
@@ -54,6 +55,25 @@ mod tests {
             )
         }
 
+        fn sign_deletion(&self, deletion: &GroupExpenseDeletion) -> Vec<u8> {
+            sign_deletion(&self.secret_key, &self.uuid, deletion.clone()).unwrap()
+        }
+
+        fn verifies_deletion(
+            &self,
+            deletion: &GroupExpenseDeletion,
+            expense: &GroupExpenseVersion,
+            signature: &[u8],
+        ) -> bool {
+            verify_group_expense_deletion(
+                deletion.clone(),
+                expense.clone(),
+                self.uuid.clone(),
+                self.public_key.to_vec(),
+                signature.to_vec(),
+            )
+        }
+
         /// Signs `signed` as this author the way a group expense is signed,
         /// but under `label`.
         fn sign_labelled(&self, label: &[u8], signed: &impl mls_rs_codec::MlsEncode) -> Vec<u8> {
@@ -77,6 +97,9 @@ mod tests {
     /// One way of tampering with one beneficiary of a signed version.
     type BeneficiaryChange = fn(&mut GroupExpenseBeneficiary);
 
+    /// One way of tampering with a signed deletion flag.
+    type DeletionChange = fn(&mut GroupExpenseDeletion);
+
     /// A version whose beneficiaries are listed in UUID order, as they are
     /// signed.
     fn version() -> GroupExpenseVersion {
@@ -94,16 +117,37 @@ mod tests {
                 beneficiary(CAROL, "60.00", false),
             ],
             is_settlement: false,
-            is_deleted: false,
         }
     }
 
-    /// Bob paying `recipient_uuid` back what he owes them.
+    /// Bob paying `recipient_uuid` back what he owes them, as recorded: a
+    /// settlement is never edited, so its first revision is its only one.
     fn settlement(recipient_uuid: &str) -> GroupExpenseVersion {
         GroupExpenseVersion {
+            revision: 1,
             beneficiaries: vec![beneficiary(recipient_uuid, "90.00", false)],
             is_settlement: true,
             ..version()
+        }
+    }
+
+    /// The flag deleting the expense of [`version`] for the first time.
+    fn deletion() -> GroupExpenseDeletion {
+        GroupExpenseDeletion {
+            group_uuid: version().group_uuid,
+            expense_uuid: version().expense_uuid,
+            deletion_revision: 1,
+            is_deleted: true,
+        }
+    }
+
+    /// The flag restoring the expense of [`version`] once [`deletion`] deleted
+    /// it.
+    fn restoring() -> GroupExpenseDeletion {
+        GroupExpenseDeletion {
+            deletion_revision: 2,
+            is_deleted: false,
+            ..deletion()
         }
     }
 
@@ -142,7 +186,6 @@ mod tests {
             "creditor_uuid": version.creditor_uuid,
             "beneficiaries": beneficiaries,
             "is_settlement": version.is_settlement,
-            "is_deleted": version.is_deleted,
             "author_uuid": author_uuid,
             "signature": BASE64_STANDARD.encode(signature),
         });
@@ -196,7 +239,6 @@ mod tests {
                 })
                 .collect(),
             is_settlement: content["is_settlement"].as_bool().unwrap(),
-            is_deleted: content["is_deleted"].as_bool().unwrap(),
         };
 
         let signature = BASE64_STANDARD.decode(text(&content, "signature")).unwrap();
@@ -346,7 +388,6 @@ mod tests {
                 v.beneficiaries[1].share = first;
             }),
             ("made a settlement", |v| v.is_settlement = true),
-            ("deleted", |v| v.is_deleted = true),
         ];
 
         for (change, apply) in changes {
@@ -385,6 +426,45 @@ mod tests {
                     "{change} of beneficiary {index} must not verify"
                 );
             }
+        }
+    }
+
+    /// An expense is created at revision 1 and edited 10 times at most, so 11
+    /// is the last revision it reaches.
+    #[test]
+    fn test_a_version_at_the_first_or_the_last_revision_verifies() {
+        let alice = Author::new();
+
+        for revision in [1, 11] {
+            let version = GroupExpenseVersion {
+                revision,
+                ..version()
+            };
+
+            assert!(
+                alice.verifies(&version, &alice.sign(&version)),
+                "revision {revision} must verify"
+            );
+        }
+    }
+
+    /// At revision 0, or past the last, a version is refused however good its
+    /// signature: the cap holds even against a server that keeps more edits
+    /// than the DuckCount API.
+    #[test]
+    fn test_a_version_at_revision_0_or_past_the_last_is_refused() {
+        let alice = Author::new();
+
+        for revision in [0, 12, u64::MAX] {
+            let version = GroupExpenseVersion {
+                revision,
+                ..version()
+            };
+
+            assert!(
+                !alice.verifies(&version, &alice.sign(&version)),
+                "revision {revision} must not verify"
+            );
         }
     }
 
@@ -450,25 +530,37 @@ mod tests {
         }
     }
 
+    /// Deleting a settlement is no version and nobody edits one, so no
+    /// settlement is ever past revision 1: one that is would rewrite the
+    /// repayment on every member's device that never showed the first, its
+    /// recipient's word for it or not.
     #[test]
-    fn test_a_deleted_settlement_is_refused_once_restored_or_made_an_expense() {
+    fn test_a_settlement_past_revision_1_is_refused_even_by_its_recipient() {
         let alice = Author::new();
-        let settlement = GroupExpenseVersion {
-            is_deleted: true,
-            ..settlement(&alice.uuid)
-        };
+
+        for revision in [2, 11] {
+            let settlement = GroupExpenseVersion {
+                revision,
+                ..settlement(&alice.uuid)
+            };
+
+            assert!(
+                !alice.verifies(&settlement, &alice.sign(&settlement)),
+                "revision {revision} must not verify"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_settlement_passed_off_as_an_expense_is_refused() {
+        let alice = Author::new();
+        let settlement = settlement(&alice.uuid);
 
         let signature = alice.sign(&settlement);
-
-        assert!(alice.verifies(&settlement, &signature));
-
-        let mut restored = settlement.clone();
-        restored.is_deleted = false;
 
         let mut expense = settlement.clone();
         expense.is_settlement = false;
 
-        assert!(!alice.verifies(&restored, &signature));
         assert!(!alice.verifies(&expense, &signature));
     }
 
@@ -585,14 +677,15 @@ mod tests {
         let version = version();
 
         // The very bytes a version is signed over, labelled as a version, as
-        // group information, as a one-time expense and as a settled mark: only
-        // the first one verifies.
+        // a deletion flag, as group information, as a one-time expense and as
+        // a settled mark: only the first one verifies.
         assert!(alice.verifies(
             &version,
             &alice.sign_labelled(group_expense::LABEL, &version),
         ));
 
         for label in [
+            group_expense::DELETION_LABEL,
             group_information::LABEL,
             one_time_expense::LABEL,
             one_time_expense::SETTLED_MARK_LABEL,
@@ -601,10 +694,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_a_version_s_signature_does_not_pass_for_another_kind() {
-        let alice = Author::new();
-
+    /// Whether each of a version of a group's information, a one-time expense
+    /// and a settled mark, signed by `alice` the way it is but under `label`,
+    /// verifies as what it is.
+    fn other_kinds_signed_under(alice: &Author, label: &[u8]) -> [(&'static str, bool); 3] {
         let information = GroupInformation {
             group_uuid: "0b4f1a0e-5c3d-8e2a-9f61-7d2c4b8a1e05".to_string(),
             revision: 3,
@@ -634,27 +727,47 @@ mod tests {
             is_settled: true,
         };
 
+        [
+            (
+                "group information",
+                group_information::verify_group_information(
+                    alice.uuid.clone(),
+                    alice.public_key.to_vec(),
+                    information.clone(),
+                    alice.sign_labelled(label, &information),
+                ),
+            ),
+            (
+                "a one-time expense",
+                one_time_expense::verify_one_time_expense(
+                    alice.uuid.clone(),
+                    alice.public_key.to_vec(),
+                    manifest.clone(),
+                    alice.sign_labelled(label, &manifest),
+                ),
+            ),
+            (
+                "a settled mark",
+                one_time_expense::verify_one_time_expense_settled_mark(
+                    alice.uuid.clone(),
+                    alice.public_key.to_vec(),
+                    mark.clone(),
+                    alice.sign_labelled(label, &mark),
+                ),
+            ),
+        ]
+    }
+
+    /// A deletion flag signed under a version's label is in
+    /// [`test_a_signature_of_another_kind_does_not_pass_for_a_deletion_flag`].
+    #[test]
+    fn test_a_version_s_signature_does_not_pass_for_another_kind() {
+        let alice = Author::new();
+
         // Each of them signed the way it is, but under a version's label.
-        assert!(!group_information::verify_group_information(
-            alice.uuid.clone(),
-            alice.public_key.to_vec(),
-            information.clone(),
-            alice.sign_labelled(group_expense::LABEL, &information),
-        ));
-
-        assert!(!one_time_expense::verify_one_time_expense(
-            alice.uuid.clone(),
-            alice.public_key.to_vec(),
-            manifest.clone(),
-            alice.sign_labelled(group_expense::LABEL, &manifest),
-        ));
-
-        assert!(!one_time_expense::verify_one_time_expense_settled_mark(
-            alice.uuid.clone(),
-            alice.public_key.to_vec(),
-            mark.clone(),
-            alice.sign_labelled(group_expense::LABEL, &mark),
-        ));
+        for (kind, verifies) in other_kinds_signed_under(&alice, group_expense::LABEL) {
+            assert!(!verifies, "{kind} must not verify");
+        }
     }
 
     #[test]
@@ -667,6 +780,260 @@ mod tests {
 
         for key in [Vec::new(), vec![0; 3], vec![0; 32]] {
             assert!(!verify_group_expense(
+                version(),
+                alice.uuid.clone(),
+                key,
+                signature.clone(),
+            ));
+        }
+    }
+
+    #[test]
+    fn test_a_signed_deletion_flag_verifies() {
+        // Alice neither paid nor benefits: any member may delete and restore
+        // any expense but a settlement.
+        let alice = Author::new();
+
+        for flag in [deletion(), restoring()] {
+            assert!(alice.verifies_deletion(&flag, &version(), &alice.sign_deletion(&flag)));
+        }
+    }
+
+    /// Deleting and restoring are no edit: an expense that has had all its
+    /// edits is still deleted and restored.
+    #[test]
+    fn test_an_expense_at_its_last_revision_is_still_deleted_and_restored() {
+        let alice = Author::new();
+        let expense = GroupExpenseVersion {
+            revision: 11,
+            ..version()
+        };
+
+        for flag in [deletion(), restoring()] {
+            assert!(alice.verifies_deletion(&flag, &expense, &alice.sign_deletion(&flag)));
+        }
+    }
+
+    #[test]
+    fn test_any_change_to_a_signed_deletion_flag_is_refused() {
+        let alice = Author::new();
+        let signature = alice.sign_deletion(&restoring());
+
+        assert!(alice.verifies_deletion(&restoring(), &version(), &signature));
+
+        let changes: Vec<(&str, DeletionChange)> = vec![
+            ("another group", |d| {
+                d.group_uuid = Uuid::new_v4().to_string()
+            }),
+            ("another expense", |d| {
+                d.expense_uuid = Uuid::new_v4().to_string()
+            }),
+            ("the group and expense swapped", |d| {
+                std::mem::swap(&mut d.group_uuid, &mut d.expense_uuid)
+            }),
+            ("an older deletion revision", |d| d.deletion_revision = 1),
+            ("a newer deletion revision", |d| d.deletion_revision = 3),
+            ("the flag flipped", |d| d.is_deleted = !d.is_deleted),
+        ];
+
+        for (change, apply) in changes {
+            let mut changed = restoring();
+            apply(&mut changed);
+
+            // Checked against the expense it names, so that only the
+            // signature tells it from the one signed.
+            let expense = GroupExpenseVersion {
+                group_uuid: changed.group_uuid.clone(),
+                expense_uuid: changed.expense_uuid.clone(),
+                ..version()
+            };
+
+            assert!(
+                !alice.verifies_deletion(&changed, &expense, &signature),
+                "{change} must not verify"
+            );
+        }
+    }
+
+    /// Signed as it is, a flag naming another expense than the one it is
+    /// served with says nothing of that one.
+    #[test]
+    fn test_a_deletion_flag_naming_another_expense_or_group_is_refused() {
+        let alice = Author::new();
+
+        let changes: Vec<(&str, DeletionChange)> = vec![
+            ("another group", |d| {
+                d.group_uuid = Uuid::new_v4().to_string()
+            }),
+            ("another expense", |d| {
+                d.expense_uuid = Uuid::new_v4().to_string()
+            }),
+            ("the group and expense swapped", |d| {
+                std::mem::swap(&mut d.group_uuid, &mut d.expense_uuid)
+            }),
+        ];
+
+        for (change, apply) in changes {
+            let mut flag = deletion();
+            apply(&mut flag);
+
+            assert!(
+                !alice.verifies_deletion(&flag, &version(), &alice.sign_deletion(&flag)),
+                "a flag naming {change} must not verify"
+            );
+        }
+    }
+
+    /// Deletion revision 0 is that of an expense never deleted, which has no
+    /// flag: one claiming it is refused, deleting or restoring.
+    #[test]
+    fn test_a_deletion_flag_at_revision_0_is_refused() {
+        let alice = Author::new();
+
+        for is_deleted in [true, false] {
+            let flag = GroupExpenseDeletion {
+                deletion_revision: 0,
+                is_deleted,
+                ..deletion()
+            };
+
+            assert!(!alice.verifies_deletion(&flag, &version(), &alice.sign_deletion(&flag)));
+        }
+    }
+
+    #[test]
+    fn test_a_settlement_deleted_by_its_recipient_verifies() {
+        let alice = Author::new();
+        let settlement = settlement(&alice.uuid);
+
+        let flag = deletion();
+
+        assert!(alice.verifies_deletion(&flag, &settlement, &alice.sign_deletion(&flag)));
+    }
+
+    /// Only the member paid can take back that they were.
+    #[test]
+    fn test_a_settlement_deleted_by_anybody_but_its_recipient_is_refused() {
+        let alice = Author::new();
+
+        // Bob paying Carol, deleted by Alice.
+        let deleted_by_another = settlement(CAROL);
+
+        // Alice paying Carol, deleted by Alice, who paid.
+        let deleted_by_its_payer = GroupExpenseVersion {
+            creditor_uuid: alice.uuid.clone(),
+            ..settlement(CAROL)
+        };
+
+        // Bob paying Alice and Carol, which nobody records, deleted by Alice.
+        let paid_to_more_than_her = GroupExpenseVersion {
+            beneficiaries: vec![
+                beneficiary(&alice.uuid, "45.00", false),
+                beneficiary(CAROL, "45.00", false),
+            ],
+            ..settlement(&alice.uuid)
+        };
+
+        let flag = deletion();
+        let signature = alice.sign_deletion(&flag);
+
+        for settlement in [
+            deleted_by_another,
+            deleted_by_its_payer,
+            paid_to_more_than_her,
+        ] {
+            assert!(!alice.verifies_deletion(&flag, &settlement, &signature));
+        }
+    }
+
+    #[test]
+    fn test_a_settlement_restored_is_refused_even_by_its_recipient() {
+        let alice = Author::new();
+        let settlement = settlement(&alice.uuid);
+
+        let flag = restoring();
+
+        assert!(!alice.verifies_deletion(&flag, &settlement, &alice.sign_deletion(&flag)));
+    }
+
+    #[test]
+    fn test_a_deletion_flag_is_refused_under_another_author() {
+        let alice = Author::new();
+        let signature = alice.sign_deletion(&deletion());
+
+        // The flag naming someone else as its author, with Alice's key.
+        assert!(!verify_group_expense_deletion(
+            deletion(),
+            version(),
+            Uuid::new_v4().to_string(),
+            alice.public_key.to_vec(),
+            signature,
+        ));
+    }
+
+    #[test]
+    fn test_a_member_cannot_delete_an_expense_for_another() {
+        // Carol holds the group key and so can seal any flag she likes, but
+        // she signs with her own key, not Alice's.
+        let alice = Author::new();
+        let carol = Author::new();
+
+        let forged = sign_deletion(&carol.secret_key, &alice.uuid, deletion()).unwrap();
+
+        assert!(!alice.verifies_deletion(&deletion(), &version(), &forged));
+    }
+
+    #[test]
+    fn test_a_signature_of_another_kind_does_not_pass_for_a_deletion_flag() {
+        let alice = Author::new();
+        let flag = deletion();
+
+        // The very bytes a flag is signed over, labelled as a flag, as a
+        // version, as group information, as a one-time expense and as a
+        // settled mark: only the first one verifies.
+        assert!(alice.verifies_deletion(
+            &flag,
+            &version(),
+            &alice.sign_labelled(group_expense::DELETION_LABEL, &flag),
+        ));
+
+        for label in [
+            group_expense::LABEL,
+            group_information::LABEL,
+            one_time_expense::LABEL,
+            one_time_expense::SETTLED_MARK_LABEL,
+        ] {
+            assert!(!alice.verifies_deletion(
+                &flag,
+                &version(),
+                &alice.sign_labelled(label, &flag),
+            ));
+        }
+    }
+
+    /// A version signed under a flag's label is in
+    /// [`test_a_signature_of_another_kind_does_not_pass_for_a_version`].
+    #[test]
+    fn test_a_deletion_flag_s_signature_does_not_pass_for_another_kind() {
+        let alice = Author::new();
+
+        // Each of them signed the way it is, but under a flag's label.
+        for (kind, verifies) in other_kinds_signed_under(&alice, group_expense::DELETION_LABEL) {
+            assert!(!verifies, "{kind} must not verify");
+        }
+    }
+
+    #[test]
+    fn test_malformed_deletion_flag_keys_and_signatures_are_refused() {
+        let alice = Author::new();
+        let signature = alice.sign_deletion(&deletion());
+
+        assert!(!alice.verifies_deletion(&deletion(), &version(), &[]));
+        assert!(!alice.verifies_deletion(&deletion(), &version(), &signature[1..]));
+
+        for key in [Vec::new(), vec![0; 3], vec![0; 32]] {
+            assert!(!verify_group_expense_deletion(
+                deletion(),
                 version(),
                 alice.uuid.clone(),
                 key,

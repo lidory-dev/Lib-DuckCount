@@ -6,7 +6,8 @@ mod tests {
         beneficiary::Beneficiary,
         currency::Currency,
         expense::{
-            Expense, ExpenseError, compute_beneficiaries, max_beneficiaries, validate_expense,
+            Expense, ExpenseError, compute_beneficiaries, max_beneficiaries,
+            max_group_expense_edits, validate_expense,
         },
     };
     use bigdecimal::{BigDecimal, Zero};
@@ -384,6 +385,12 @@ mod tests {
     fn test_max_beneficiaries_is_the_cap_the_api_enforces() {
         // The API holds its own copy of the cap: the two must move together.
         assert_eq!(max_beneficiaries(), 100);
+    }
+
+    #[test]
+    fn test_max_group_expense_edits_is_the_cap_the_api_enforces() {
+        // The API holds its own copy of the cap: the two must move together.
+        assert_eq!(max_group_expense_edits(), 10);
     }
 
     #[test]

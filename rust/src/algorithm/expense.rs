@@ -77,6 +77,27 @@ pub fn max_beneficiaries() -> u16 {
     MAX_BENEFICIARIES as u16
 }
 
+/// The most edits a group expense may have, as many as a one-time expense: it is
+/// created at revision 1, and each edit is one more, up to `1 + MAX_GROUP_EXPENSE_EDITS`.
+///
+/// The server keeps every version of a group expense, none pruned, for its history to
+/// be whole, and this is what bounds them. The DuckCount API refuses an edit past it,
+/// holding its own copy of the cap: the two change together. A version past it is
+/// refused whoever stored it, see
+/// [`verify_group_expense`](crate::cryptography::mls::group_expense::verify_group_expense).
+/// Deleting an expense and restoring it are no edit, and use up none, see
+/// [`GroupExpenseDeletion`](crate::cryptography::mls::group_expense::GroupExpenseDeletion).
+pub const MAX_GROUP_EXPENSE_EDITS: u64 = 10;
+
+/// Exposes [`MAX_GROUP_EXPENSE_EDITS`] to the foreign bindings so clients can stop
+/// offering an edit past it instead of hardcoding it.
+///
+/// The value is narrowed to `u16`, as [`max_beneficiaries`] is.
+#[uniffi::export]
+pub fn max_group_expense_edits() -> u16 {
+    MAX_GROUP_EXPENSE_EDITS as u16
+}
+
 /// The most digits an amount or a share may have before its decimal point: a thousand
 /// trillion, far past any real expense, and few enough to keep adding them up cheap.
 const MAX_WHOLE_DIGITS: usize = 15;
