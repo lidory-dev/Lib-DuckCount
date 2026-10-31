@@ -104,6 +104,29 @@ pub struct MemberInfo {
     pub signature_key: Vec<u8>,
 }
 
+/// Whose Commits a member of a group the DuckCount API holds applies, given
+/// for each message it processes, see
+/// [`process_incoming_message`](crate::cryptography::mls::group::MlsGroup::process_incoming_message).
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct CommitPolicy {
+    /// UUID of the group's creator, whose Commits are applied whatever they
+    /// change.
+    pub creator_uuid: String,
+    /// UUIDs of the members the DuckCount API stored the message being
+    /// processed with, its `departed_member_uuids`: for a Commit stored
+    /// through `DELETE /groups/{uuid}/departed`, the members the server
+    /// checked had left the group, or deleted their account, as it stored
+    /// it, and nobody for any other message. Any other member's Commit is
+    /// applied only if it removes exactly these members, all of them and
+    /// nobody else; the order they are named in does not matter, nor a member
+    /// named twice.
+    ///
+    /// It is the server's list for that one message, never this device's own
+    /// view of who has departed, so that every member decides alike about
+    /// every Commit, and one they all refuse is replaced by the creator.
+    pub departed_uuids: Vec<String>,
+}
+
 /// What processing an incoming message produced.
 #[derive(uniffi::Enum, Debug)]
 pub enum ProcessedMessage {

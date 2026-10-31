@@ -33,8 +33,14 @@
 //! [`MlsGroup::pin_member`](crate::cryptography::mls::group::MlsGroup::pin_member).
 //! That tree's word is taken, unlike any other's, because its author is
 //! somebody this device trusts: the group's creator, whom the host pinned
-//! before joining from their Welcome, and the one member whose Commits
-//! change who is in it.
+//! before joining from their Welcome, and the one member whose Commits seat
+//! anybody in it. Any other member's Commit is applied only to remove
+//! members who have departed, see
+//! [`MlsGroup::process_incoming_message`](crate::cryptography::mls::group::MlsGroup::process_incoming_message),
+//! which seats nobody, and the update path it carries keeps the leaf its
+//! committer had, signature key included, see `check_member_committer_leaf`
+//! in `config.rs`. So every leaf in the tree was added by the creator, and
+//! holds the key the creator seated it with.
 
 use mls_rs::ExtensionList;
 use mls_rs::identity::{CredentialType, SigningIdentity};
@@ -42,7 +48,8 @@ use mls_rs::time::MlsTime;
 use mls_rs_core::identity::{IdentityProvider, MemberValidationContext};
 
 use crate::cryptography::mls::{
-    MlsError, identity::credential::user_uuid_from, storage::identity_pin::IdentityPinStore,
+    MlsError, config::check_member_committer_leaf, identity::credential::user_uuid_from,
+    storage::identity_pin::IdentityPinStore,
 };
 
 /// Identity provider that accepts basic credentials holding a user UUID, and
@@ -69,6 +76,10 @@ impl IdentityProvider for PinningIdentityProvider {
         _context: MemberValidationContext<'_>,
     ) -> Result<(), Self::Error> {
         let user_uuid = user_uuid_from(&signing_identity.credential)?;
+
+        // Before the pin, which would refuse a leaf a member other than the
+        // creator may not commit on some devices and not on others.
+        check_member_committer_leaf(&user_uuid, &signing_identity.signature_key)?;
 
         self.pins
             .verify(&user_uuid, signing_identity.signature_key.as_ref())
@@ -103,13 +114,28 @@ impl IdentityProvider for PinningIdentityProvider {
         // Consulted whenever a member's leaf node is replaced, which with an
         // update path required on every commit, is constantly, not just on the
         // external commits the name suggests. A member may succeed themselves
-        // and nobody else, so the answer is whether both identities name the
-        // same user.
+        // and nobody else, so both identities have to name the same user.
         //
-        // This does not let a pinned member quietly swap their signature key:
-        // the new leaf still goes through `validate_member`, where the pin
-        // decides.
-        Ok(user_uuid_from(&predecessor.credential)? == user_uuid_from(&successor.credential)?)
+        // With the signature key their leaf already had, too. A user has one
+        // signature key, the same in every group, and this library never
+        // commits another, so a new one is a member's own doing: checked
+        // against the pin alone, in `validate_member`, it would be taken by
+        // every member who has none for them, the group splitting in two over
+        // one Commit, and the key a member's leaf holds would no longer be the
+        // one the creator seated it with, which is what pinning a member from
+        // the tree of a group the DuckCount API holds goes by.
+        //
+        // mls-rs asks this only once `validate_member` has taken the new leaf,
+        // though, which a member who has a key pinned for its committer
+        // refuses first, with an `IdentityKeyMismatch`. So a committer other
+        // than the creator has the leaf held to theirs before the pin is
+        // consulted, see `check_member_committer_leaf` in `config.rs`, and
+        // every member refuses it alike. The creator's is held to the key the
+        // host pinned for them before joining from their Welcome.
+        Ok(
+            user_uuid_from(&predecessor.credential)? == user_uuid_from(&successor.credential)?
+                && predecessor.signature_key == successor.signature_key,
+        )
     }
 
     fn supported_types(&self) -> Vec<CredentialType> {

@@ -167,17 +167,18 @@ mod tests {
     }
 
     /// What the app's Welcome to a group of `member_uuids` hands over, its
-    /// `WelcomePayload`: the group's key and every member's profile key.
+    /// `WelcomePayload`: every member's profile key. The group's content key
+    /// is no part of it, every member deriving it from the epoch the Welcome
+    /// opens.
     fn welcome_payload(member_uuids: &[String]) -> Vec<u8> {
-        json!({ "group_key": encoded_key(), "profile_keys": profile_keys(member_uuids) })
+        json!({ "profile_keys": profile_keys(member_uuids) })
             .to_string()
             .into_bytes()
     }
 
     /// The application message the app's creator sends the members already in
     /// a group as he adds somebody, its `ProfileKeysMessage`: the largest the
-    /// app posts in a group, the key a rotation hands over and a member's own
-    /// profile key being a key each.
+    /// app posts in a group, a member's own profile key being a single key.
     fn profile_keys_message(member_uuids: &[String]) -> Vec<u8> {
         json!({ "type": "profile_keys", "profile_encryption_keys": profile_keys(member_uuids) })
             .to_string()

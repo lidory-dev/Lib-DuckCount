@@ -9,25 +9,27 @@
 //! "restore" them by accident.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use mls_rs::client_builder::{
     BaseConfig, PaddingMode, WithCryptoProvider, WithGroupStateStorage, WithIdentityProvider,
     WithKeyPackageRepo, WithMlsRules,
 };
-use mls_rs::group::{GroupContext, Roster};
+use mls_rs::group::{GroupContext, Member, Roster};
 use mls_rs::identity::SigningIdentity;
 use mls_rs::mls_rules::{
     CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle,
 };
 use mls_rs::{Client, CryptoProvider, MlsRules};
-use mls_rs_core::crypto::SignatureSecretKey;
+use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
 use mls_rs_crypto_awslc::AwsLcCryptoProvider;
 
 use crate::cryptography::mls::{
     CIPHER_SUITE, MlsError,
     identity::{credential::user_uuid_from, pinning_provider::PinningIdentityProvider},
     storage::{group_state::SealedGroupStateStorage, key_package::SealedKeyPackageStorage},
+    types::CommitPolicy,
 };
 
 /// How long a generated key package stays valid.
@@ -118,7 +120,7 @@ pub fn mls_rules() -> DuckCountMlsRules {
 }
 
 /// The protocol rules of [`mls_rules`]: the options it sets, and on receipt,
-/// the one member the host allows to commit, see `with_allowed_committer`.
+/// the commit policy the host holds the group to, see `with_commit_policy`.
 #[derive(Clone, Debug)]
 pub struct DuckCountMlsRules {
     commit_options: CommitOptions,
@@ -128,22 +130,26 @@ pub struct DuckCountMlsRules {
 impl MlsRules for DuckCountMlsRules {
     type Error = MlsError;
 
-    /// Refuses a received Commit from anybody but the member allowed to
-    /// commit, if the host named one, and lets every other Commit through as
+    /// Refuses a received Commit the commit policy the host named, if any,
+    /// does not allow, see `allows`, and lets every other Commit through as
     /// it is, as mls-rs's own rules do.
     ///
     /// mls-rs asks this once it has authenticated the Commit, and before it
     /// checks anything the Commit carries: the identity of each member it
     /// adds or updates above all, which the identity provider checks against
-    /// the keys pinned for them. A member who may not commit would otherwise
-    /// choose which error the Commit is refused with, and whom it names: an
-    /// `IdentityKeyMismatch` for a contact of the receiver, say, which tells
-    /// of a key that contact never changed.
+    /// the keys pinned for them. A member who may not commit what they did
+    /// would otherwise choose which error the Commit is refused with, and
+    /// whom it names: an `IdentityKeyMismatch` for a contact of the receiver,
+    /// say, which tells of a key that contact never changed.
+    ///
+    /// A Commit the policy takes from a member other than the creator has
+    /// the leaf its update path carries held to theirs from then on, see
+    /// `check_member_committer_leaf`.
     fn filter_proposals(
         &self,
         direction: CommitDirection,
         source: CommitSource,
-        _current_roster: &Roster,
+        current_roster: &Roster,
         _current_context: &GroupContext,
         proposals: ProposalBundle,
     ) -> Result<ProposalBundle, MlsError> {
@@ -151,10 +157,27 @@ impl MlsRules for DuckCountMlsRules {
         // `MlsGroup::process_incoming_message` refuses before mls-rs reads it.
         if direction == CommitDirection::Receive
             && let CommitSource::ExistingMember(committer) = &source
-            && let Some(allowed_committer) = ALLOWED_COMMITTER.with_borrow(Clone::clone)
-            && user_uuid_from(&committer.signing_identity.credential)? != allowed_committer
         {
-            return Err(MlsError::UnauthorizedChange);
+            let member_committer = COMMIT_POLICY.with_borrow(|policy| -> Result<_, MlsError> {
+                let Some(policy) = policy else {
+                    return Ok(None);
+                };
+
+                if !allows(policy, committer, current_roster, &proposals)? {
+                    return Err(MlsError::UnauthorizedChange);
+                }
+
+                let committer_uuid = user_uuid_from(&committer.signing_identity.credential)?;
+
+                Ok(
+                    (committer_uuid != policy.creator_uuid).then(|| MemberCommitter {
+                        user_uuid: committer_uuid,
+                        signature_key: committer.signing_identity.signature_key.clone(),
+                    }),
+                )
+            })?;
+
+            MEMBER_COMMITTER.set(member_committer);
         }
 
         Ok(proposals)
@@ -178,36 +201,155 @@ impl MlsRules for DuckCountMlsRules {
     }
 }
 
-thread_local! {
-    /// The only member whose Commits the group this thread is processing a
-    /// message for applies, if the host named one, see
-    /// [`with_allowed_committer`].
-    static ALLOWED_COMMITTER: RefCell<Option<String>> = const { RefCell::new(None) };
+/// Whether `policy` lets `committer` commit `proposals` to a group whose
+/// members are `roster`, as they were before the Commit.
+///
+/// The creator commits whatever they change. Anybody else commits only the
+/// removal of the members `policy` names as departed, and of all of them:
+/// Remove proposals and nothing else, at least one, the leaves they remove
+/// held by exactly those members. That is what lets a departed member be cut
+/// off while the creator's phone is offline, and nothing more: no other
+/// member adds anybody, removes anybody still in the group, or changes what
+/// the group context holds. A Commit removing nobody is refused too: every
+/// Commit takes the one epoch the DuckCount API stores a Commit for, which
+/// the creator's next change would otherwise have, and a member removing
+/// nobody has no reason to.
+///
+/// The members named are the ones the DuckCount API stored the Commit with,
+/// once it had checked they had departed, and which it counts as removed by
+/// it from then on. A Commit removing only some of them would leave in the
+/// tree the leaf of a member the server no longer lists as departed, which
+/// nobody could then remove, so it is refused as one removing somebody else
+/// is. The server names nobody with any other message, so a Commit it stored
+/// any other way is refused whatever it removes. Each user holds one leaf, so
+/// comparing the users removed compares the leaves; the order they are named
+/// in does not matter, nor a user named twice.
+///
+/// The update path every Commit carries gives its committer a new leaf, which
+/// has to name them and hold the signature key their leaf had, see
+/// [`check_member_committer_leaf`].
+///
+/// # Errors
+///
+/// * `MlsError::InvalidCredential` - If the committer's credential is
+///   malformed.
+fn allows(
+    policy: &CommitPolicy,
+    committer: &Member,
+    roster: &Roster,
+    proposals: &ProposalBundle,
+) -> Result<bool, MlsError> {
+    if user_uuid_from(&committer.signing_identity.credential)? == policy.creator_uuid {
+        return Ok(true);
+    }
+
+    let removals = proposals.remove_proposals();
+
+    if removals.is_empty() || removals.len() != proposals.length() {
+        return Ok(false);
+    }
+
+    // A leaf nobody holds, which mls-rs refuses once it gets to the removal,
+    // is held by nobody departed either: refused here, it is refused as
+    // anything else this committer may not commit is.
+    let removed = removals
+        .iter()
+        .map(|removal| {
+            roster
+                .member_with_index(removal.proposal.to_remove())
+                .ok()
+                .and_then(|member| user_uuid_from(&member.signing_identity.credential).ok())
+        })
+        .collect::<Option<HashSet<_>>>();
+
+    let departed = policy
+        .departed_uuids
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    Ok(removed.is_some_and(|removed| removed == departed))
 }
 
-/// Runs `process`, which processes a message, refusing a Commit from anybody
-/// but `allowed_committer`, a user UUID, if given, see
-/// [`DuckCountMlsRules::filter_proposals`].
+/// Refuses the leaf naming `user_uuid` with `signature_key`, one a Commit
+/// being received carries, if the commit policy took the Commit from a member
+/// other than the creator, see `allows`, and the leaf is not the one they
+/// had: it has to name them, and hold the signature key their leaf held.
+///
+/// Such a Commit seats nobody, so the one leaf it carries is the one its
+/// update path gives its committer. A user has one signature key, the same in
+/// every group, and this library never commits another, so a new one is the
+/// committer's own doing, and so is a leaf naming somebody else. mls-rs has
+/// the identity provider validate that leaf, which checks it against the key
+/// pinned for whoever it names, before it asks whether the leaf may replace
+/// the committer's, see `valid_successor` in `pinning_provider.rs`. Left to
+/// that, either would be refused with an `IdentityKeyMismatch` by every
+/// member who has a key pinned for whoever the leaf names, among them the
+/// creator for any member they seated, and with a `ProtocolFailed` by every
+/// other: the creator's device would wait on the Commit as on a key that
+/// changed, and never replace it, while every other refused it. Refused
+/// here first, whatever the pins hold, it is refused by every member alike,
+/// with an error naming nobody, and the creator replaces it.
+///
+/// # Errors
+///
+/// * `MlsError::UnauthorizedChange` - If the leaf is not the committer's as
+///   it was.
+pub(crate) fn check_member_committer_leaf(
+    user_uuid: &str,
+    signature_key: &SignaturePublicKey,
+) -> Result<(), MlsError> {
+    MEMBER_COMMITTER.with_borrow(|committer| match committer {
+        Some(committer)
+            if committer.user_uuid != user_uuid || committer.signature_key != *signature_key =>
+        {
+            Err(MlsError::UnauthorizedChange)
+        }
+        _ => Ok(()),
+    })
+}
+
+/// A member other than the creator whose Commit the commit policy took, as
+/// their leaf named them before it, see [`check_member_committer_leaf`].
+struct MemberCommitter {
+    user_uuid: String,
+    signature_key: SignaturePublicKey,
+}
+
+thread_local! {
+    /// The commit policy the group this thread is processing a message for
+    /// holds to, if the host named one, see [`with_commit_policy`].
+    static COMMIT_POLICY: RefCell<Option<CommitPolicy>> = const { RefCell::new(None) };
+
+    /// The member other than the creator whose Commit the policy took, while
+    /// that message is processed, see [`check_member_committer_leaf`].
+    static MEMBER_COMMITTER: RefCell<Option<MemberCommitter>> = const { RefCell::new(None) };
+}
+
+/// Runs `process`, which processes a message, refusing a Commit `policy`
+/// does not allow, if given, see [`DuckCountMlsRules::filter_proposals`].
 ///
 /// mls-rs hands its rules the group and the Commit and nothing more, and the
 /// client holds a single copy of them for every group. They run within the
 /// group's `process_incoming_message`, though, on the thread that called it,
-/// so a committer kept for that thread while `process` runs reaches that
-/// message and no other.
-pub(crate) fn with_allowed_committer<T>(
-    allowed_committer: Option<String>,
+/// so a policy kept for that thread while `process` runs reaches that message
+/// and no other, as does the committer it took the message from.
+pub(crate) fn with_commit_policy<T>(
+    policy: Option<CommitPolicy>,
     process: impl FnOnce() -> T,
 ) -> T {
-    /// Puts back the committer there was, however `process` ends.
-    struct Restore(Option<String>);
+    /// Puts back the policy and the committer there were, however `process`
+    /// ends.
+    struct Restore(Option<CommitPolicy>, Option<MemberCommitter>);
 
     impl Drop for Restore {
         fn drop(&mut self) {
-            ALLOWED_COMMITTER.set(self.0.take());
+            COMMIT_POLICY.set(self.0.take());
+            MEMBER_COMMITTER.set(self.1.take());
         }
     }
 
-    let _restore = Restore(ALLOWED_COMMITTER.replace(allowed_committer));
+    let _restore = Restore(COMMIT_POLICY.replace(policy), MEMBER_COMMITTER.take());
 
     process()
 }

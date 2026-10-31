@@ -40,7 +40,7 @@ mod tests {
         max_group_state_len_in_tests, with_limits_outside_tests,
     };
     use crate::cryptography::mls::storage::{MlsNamespace, MlsStore, MlsStoreError};
-    use crate::cryptography::mls::types::{InviteeKeyPackage, ProcessedMessage};
+    use crate::cryptography::mls::types::{CommitPolicy, InviteeKeyPackage, ProcessedMessage};
     use crate::cryptography::mls::{CIPHER_SUITE, MAX_GROUP_MEMBERS, MlsError, max_group_members};
 
     const SECRET: &[u8] = b"&eHml-C_AFyWdylXLd50";
@@ -225,6 +225,21 @@ mod tests {
         }
 
         groups
+    }
+
+    /// The commit policy of a group `creator` created, which nobody has
+    /// departed.
+    fn created_by(creator: &TestUser) -> Option<CommitPolicy> {
+        commit_policy(&creator.uuid, &[])
+    }
+
+    /// The commit policy of a group `creator_uuid` created, which
+    /// `departed_uuids` have departed.
+    fn commit_policy(creator_uuid: &str, departed_uuids: &[&str]) -> Option<CommitPolicy> {
+        Some(CommitPolicy {
+            creator_uuid: creator_uuid.to_string(),
+            departed_uuids: departed_uuids.iter().map(ToString::to_string).collect(),
+        })
     }
 
     /// The UUIDs of `users`, as a joiner names the members they expect.
@@ -489,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn test_members_allowing_only_the_creator_to_commit_follow_its_removals_and_additions() {
+    fn test_members_holding_to_the_commit_policy_follow_the_creators_removals_and_additions() {
         let alice = TestUser::new();
         let bob = TestUser::new();
         let carol = TestUser::new();
@@ -499,7 +514,7 @@ mod tests {
         let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
         let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
 
-        let creator = Some(alice.uuid.clone());
+        let policy = created_by(&alice);
 
         let removal = alice_group
             .remove_members(vec![carol.uuid.clone()])
@@ -508,7 +523,7 @@ mod tests {
         for (group, removed) in [(carol_group, true), (bob_group, false)] {
             assert!(matches!(
                 group
-                    .process_incoming_message(removal.clone(), creator.clone())
+                    .process_incoming_message(removal.clone(), policy.clone())
                     .unwrap(),
                 ProcessedMessage::Commit { removed_self, .. } if removed_self == removed
             ));
@@ -522,7 +537,7 @@ mod tests {
 
         assert!(matches!(
             bob_group
-                .process_incoming_message(addition.commit, creator.clone())
+                .process_incoming_message(addition.commit, policy.clone())
                 .unwrap(),
             ProcessedMessage::Commit {
                 removed_self: false,
@@ -558,7 +573,7 @@ mod tests {
         for group in [alice_group, bob_group] {
             assert!(matches!(
                 group
-                    .process_incoming_message(message.clone(), creator.clone())
+                    .process_incoming_message(message.clone(), policy.clone())
                     .unwrap(),
                 ProcessedMessage::ApplicationMessage { sender_user_uuid, .. }
                     if sender_user_uuid == dave.uuid
@@ -567,17 +582,62 @@ mod tests {
     }
 
     #[test]
-    fn test_a_commit_from_anybody_but_the_allowed_committer_is_refused_and_nothing_stored() {
-        // Bob, a member, commits a stranger in, while Alice, the creator, has
-        // his removal pending.
+    fn test_members_holding_to_the_commit_policy_apply_the_creators_update() {
+        // Alice, the creator, replaces a Commit nobody could apply with nobody
+        // left to remove: an update, which the server lists with no departed
+        // members.
         let alice = TestUser::new();
         let bob = TestUser::new();
         let carol = TestUser::new();
 
-        let groups = establish_group(&alice, &[&bob, &carol]);
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
         let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
 
-        let creator = Some(alice.uuid.clone());
+        let epoch = alice_group.epoch().unwrap();
+        let mut expected = uuids(&[&alice, &bob, &carol]);
+        expected.sort();
+
+        let update = alice_group.update().unwrap();
+        let next_key = alice_group
+            .content_key_after_pending_commit(group_uuid.clone())
+            .unwrap();
+
+        for group in [bob_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(update.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, removed_self: false, .. }
+                    if committer_user_uuid == Some(alice.uuid.clone())
+            ));
+        }
+
+        accept(alice_group);
+
+        // One epoch further, under a key every member derives, and nobody
+        // added or removed.
+        for group in [alice_group, bob_group, carol_group] {
+            assert_eq!(group.epoch().unwrap(), epoch + 1);
+            assert_eq!(group.content_key(group_uuid.clone()).unwrap(), next_key);
+            assert_eq!(member_uuids(group), expected);
+        }
+    }
+
+    #[test]
+    fn test_an_addition_by_anybody_but_the_creator_is_refused_and_nothing_stored() {
+        // Bob, a member, commits a stranger in, while Alice, the creator, has
+        // his removal pending. Dave has left, which lets Bob remove him, and
+        // nothing more.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol, &dave]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let policy = commit_policy(&alice.uuid, &[&dave.uuid]);
         let epoch = alice_group.epoch().unwrap();
 
         let intrusion = bob_group
@@ -591,15 +651,15 @@ mod tests {
             let before = user.store.records();
 
             let error = group
-                .process_incoming_message(intrusion.clone(), creator.clone())
-                .expect_err("a Commit from anybody but the creator must be refused");
+                .process_incoming_message(intrusion.clone(), policy.clone())
+                .expect_err("an addition from anybody but the creator must be refused");
 
             assert!(matches!(error, MlsError::UnauthorizedChange));
 
             // Nothing was stored, nor kept in memory.
             assert_eq!(user.store.records(), before);
             assert_eq!(group.epoch().unwrap(), epoch);
-            assert_eq!(group.members().unwrap().len(), 3);
+            assert_eq!(group.members().unwrap().len(), 4);
         }
 
         // Alice's removal is still pending, as it would not be had Bob's Commit
@@ -608,14 +668,14 @@ mod tests {
 
         assert!(matches!(
             carol_group
-                .process_incoming_message(removal, creator)
+                .process_incoming_message(removal, policy)
                 .unwrap(),
             ProcessedMessage::Commit { .. }
         ));
 
         accept(alice_group);
 
-        let mut expected = uuids(&[&alice, &carol]);
+        let mut expected = uuids(&[&alice, &carol, &dave]);
         expected.sort();
 
         assert_eq!(member_uuids(alice_group), expected);
@@ -623,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_proposal_is_refused_from_any_member_where_one_member_is_allowed_to_commit() {
+    fn test_a_proposal_is_refused_from_any_member_where_a_commit_policy_is_held() {
         let alice = TestUser::new();
         let bob = TestUser::new();
         let carol = TestUser::new();
@@ -631,15 +691,14 @@ mod tests {
         let groups = establish_group(&alice, &[&bob, &carol]);
         let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
 
-        let creator = Some(alice.uuid.clone());
-
         // Carol, leaving, proposes her own removal, which the creator refuses
-        // like everybody else.
+        // like everybody else, even with her departed.
+        let policy = commit_policy(&alice.uuid, &[&carol.uuid]);
         let leaving = carol_group.propose_self_remove().unwrap();
 
         assert!(matches!(
             alice_group
-                .process_incoming_message(leaving.clone(), creator.clone())
+                .process_incoming_message(leaving.clone(), policy.clone())
                 .unwrap_err(),
             MlsError::UnauthorizedChange
         ));
@@ -652,7 +711,7 @@ mod tests {
         for proposal in [leaving, creators] {
             assert!(matches!(
                 bob_group
-                    .process_incoming_message(proposal, creator.clone())
+                    .process_incoming_message(proposal, policy.clone())
                     .unwrap_err(),
                 MlsError::UnauthorizedChange
             ));
@@ -668,8 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn test_a_commit_from_anybody_but_the_allowed_committer_is_refused_before_what_it_carries_is_checked()
-     {
+    fn test_a_commit_the_policy_does_not_allow_is_refused_before_what_it_carries_is_checked() {
         // Bob, a member, commits Dave in under a key of his own making. Alice,
         // the creator, has Dave's real key pinned, Carol none.
         let alice = TestUser::new();
@@ -707,13 +765,545 @@ mod tests {
 
             assert!(matches!(
                 group
-                    .process_incoming_message(intrusion.clone(), Some(alice.uuid.clone()))
+                    .process_incoming_message(intrusion.clone(), created_by(&alice))
                     .unwrap_err(),
                 MlsError::UnauthorizedChange
             ));
 
             assert_eq!(user.store.records(), before);
         }
+    }
+
+    #[test]
+    fn test_a_removal_of_departed_members_by_any_member_is_applied() {
+        // Carol and Dave have left, and Bob, a member, commits their removal
+        // while Alice, the creator, is away.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+        let erin = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol, &dave, &erin]);
+        let (alice_group, bob_group, erin_group) = (&groups[0], &groups[1], &groups[4]);
+
+        // The server stored it with both, in whatever order, a member named
+        // twice counting once.
+        let policy = commit_policy(&alice.uuid, &[&dave.uuid, &carol.uuid, &dave.uuid]);
+        let epoch = alice_group.epoch().unwrap();
+
+        let removal = bob_group
+            .remove_members(vec![carol.uuid.clone(), dave.uuid.clone()])
+            .unwrap();
+
+        // Each member who reads it is told who removed them.
+        for group in [alice_group, erin_group] {
+            match group
+                .process_incoming_message(removal.clone(), policy.clone())
+                .unwrap()
+            {
+                ProcessedMessage::Commit {
+                    committer_user_uuid,
+                    removed_self,
+                    ..
+                } => {
+                    assert_eq!(committer_user_uuid, Some(bob.uuid.clone()));
+                    assert!(!removed_self);
+                }
+                other => panic!("expected a commit, got {:?}", other_kind(&other)),
+            }
+        }
+
+        accept(bob_group);
+
+        let mut expected = uuids(&[&alice, &bob, &erin]);
+        expected.sort();
+
+        for group in [alice_group, bob_group, erin_group] {
+            assert_eq!(member_uuids(group), expected);
+            assert_eq!(group.epoch().unwrap(), epoch + 1);
+        }
+
+        // Alice still changes the group as she likes once she is back, her
+        // Commit stored with nobody departed.
+        let removal = alice_group.remove_members(vec![erin.uuid.clone()]).unwrap();
+
+        assert!(matches!(
+            bob_group
+                .process_incoming_message(removal, created_by(&alice))
+                .unwrap(),
+            ProcessedMessage::Commit { committer_user_uuid, .. }
+                if committer_user_uuid == Some(alice.uuid.clone())
+        ));
+    }
+
+    #[test]
+    fn test_a_removal_of_fewer_departed_members_than_the_server_stored_it_with_is_refused() {
+        // Carol and Dave have left, and Bob, a member, names them both to the
+        // server but removes Carol alone, which would leave Dave's leaf in
+        // the tree once the server counts him as removed.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+        let erin = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol, &dave, &erin]);
+        let (alice_group, bob_group, erin_group) = (&groups[0], &groups[1], &groups[4]);
+
+        let stored_with = commit_policy(&alice.uuid, &[&carol.uuid, &dave.uuid]);
+        let epoch = alice_group.epoch().unwrap();
+
+        let removal = bob_group.remove_members(vec![carol.uuid.clone()]).unwrap();
+
+        let mut expected = uuids(&[&alice, &bob, &carol, &dave, &erin]);
+        expected.sort();
+
+        for (user, group) in [(&alice, alice_group), (&erin, erin_group)] {
+            let before = user.store.records();
+
+            assert!(matches!(
+                group
+                    .process_incoming_message(removal.clone(), stored_with.clone())
+                    .unwrap_err(),
+                MlsError::UnauthorizedChange
+            ));
+
+            // Nothing was stored, nor kept in memory: the group loaded again
+            // is the one there was.
+            assert_eq!(user.store.records(), before);
+            assert_eq!(group.epoch().unwrap(), epoch);
+            assert_eq!(member_uuids(group), expected);
+
+            let reloaded = user
+                .client
+                .load_group(group.mls_group_id().unwrap())
+                .unwrap();
+
+            assert_eq!(reloaded.epoch().unwrap(), epoch);
+            assert_eq!(member_uuids(&reloaded), expected);
+
+            // Stored with Carol alone, the same Commit is applied.
+            assert!(matches!(
+                reloaded
+                    .process_incoming_message(
+                        removal.clone(),
+                        commit_policy(&alice.uuid, &[&carol.uuid])
+                    )
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, .. }
+                    if committer_user_uuid == Some(bob.uuid.clone())
+            ));
+
+            assert_eq!(reloaded.epoch().unwrap(), epoch + 1);
+            assert!(!member_uuids(&reloaded).contains(&carol.uuid));
+        }
+    }
+
+    #[test]
+    fn test_a_member_but_the_creator_may_remove_nobody_but_departed_members() {
+        // Carol has left, and Bob, a member, tries what only Alice, the
+        // creator, may do.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol, &dave]);
+        let (alice_group, bob_group, dave_group) = (&groups[0], &groups[1], &groups[3]);
+
+        let policy = commit_policy(&alice.uuid, &[&carol.uuid]);
+        let epoch = alice_group.epoch().unwrap();
+
+        let attempts = [
+            (
+                "a removal of a member still in the group",
+                vec![dave.uuid.clone()],
+            ),
+            (
+                "a removal of a departed member and one still in the group",
+                vec![carol.uuid.clone(), dave.uuid.clone()],
+            ),
+            ("a removal of the creator", vec![alice.uuid.clone()]),
+            ("an update removing nobody", Vec::new()),
+        ]
+        .map(|(attempt, removed)| {
+            let commit = if removed.is_empty() {
+                bob_group.update().unwrap()
+            } else {
+                bob_group.remove_members(removed).unwrap()
+            };
+
+            bob_group.clear_pending_commit().unwrap();
+
+            (attempt, commit)
+        });
+
+        for (user, group) in [(&alice, alice_group), (&dave, dave_group)] {
+            let before = user.store.records();
+
+            for (attempt, commit) in &attempts {
+                assert!(
+                    matches!(
+                        group
+                            .process_incoming_message(commit.clone(), policy.clone())
+                            .unwrap_err(),
+                        MlsError::UnauthorizedChange
+                    ),
+                    "{attempt} must be refused"
+                );
+            }
+
+            // Nothing was stored, nor kept in memory.
+            assert_eq!(user.store.records(), before);
+            assert_eq!(group.epoch().unwrap(), epoch);
+            assert_eq!(group.members().unwrap().len(), 4);
+        }
+    }
+
+    #[test]
+    fn test_a_removal_of_departed_members_carrying_anything_more_is_refused_by_every_member() {
+        // Mallory, a member playing a plain mls-rs client, removes a stranger
+        // who has left, slipping something more into each Commit. Alice, the
+        // creator, has her pinned, Bob nobody.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let mut group = establish_group_with_mallory(&alice, &bob, 1, false);
+
+        let departed = group.stranger_uuids[0].clone();
+        let policy = commit_policy(&alice.uuid, &[&departed]);
+        let epoch = group.alice_group.epoch().unwrap();
+
+        let departed_index = group
+            .mallory_group
+            .member_with_identity(departed.as_bytes())
+            .unwrap()
+            .index;
+
+        let mallory = &mut group.mallory_group;
+
+        let addition = mallory
+            .commit_builder()
+            .remove_member(departed_index)
+            .unwrap()
+            .add_member(MlsMessage::from_bytes(&stranger_invitations(1)[0].key_package).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+        mallory.clear_pending_commit();
+
+        let extensions = mallory.context().extensions.clone();
+        let context_change = mallory
+            .commit_builder()
+            .remove_member(departed_index)
+            .unwrap()
+            .set_group_context_ext(extensions)
+            .unwrap()
+            .build()
+            .unwrap();
+        mallory.clear_pending_commit();
+
+        for (user, member_group) in [(&alice, &group.alice_group), (&bob, &group.bob_group)] {
+            let before = user.store.records();
+
+            for (attempt, commit) in [
+                ("an addition", &addition),
+                ("a change to the group context", &context_change),
+            ] {
+                assert!(
+                    matches!(
+                        member_group
+                            .process_incoming_message(
+                                commit.commit_message.to_bytes().unwrap(),
+                                policy.clone()
+                            )
+                            .unwrap_err(),
+                        MlsError::UnauthorizedChange
+                    ),
+                    "a removal carrying {attempt} must be refused"
+                );
+            }
+
+            assert_eq!(user.store.records(), before);
+            assert_eq!(member_group.epoch().unwrap(), epoch);
+        }
+
+        // A removal whose update path gives Mallory's leaf a signature key of
+        // her own making, under her name or under that of the member it
+        // removes, is refused with the same error by both, whatever each has
+        // pinned: Alice, who seated them, has keys pinned for Mallory and the
+        // departed member, and Bob none for either. Refused by the pins, it
+        // would be an `IdentityKeyMismatch` on Alice's device, which waits on
+        // it, and a `ProtocolFailed` on Bob's, which refuses it for good, and
+        // Alice would never replace it.
+        let crypto_provider = crate::cryptography::mls::config::crypto_provider();
+        let cipher_suite_provider = crypto_provider.cipher_suite_provider(CIPHER_SUITE).unwrap();
+
+        let leaf_changes = [
+            ("her key", group.mallory_uuid.clone()),
+            ("her leaf to the departed member", departed.clone()),
+        ]
+        .map(|(change, user_uuid)| {
+            let (secret, public) = cipher_suite_provider.signature_key_generate().unwrap();
+            let credential = BasicCredential::new(user_uuid.into_bytes()).into_credential();
+
+            let mallory = &mut group.mallory_group;
+
+            let commit = mallory
+                .commit_builder()
+                .remove_member(departed_index)
+                .unwrap()
+                .set_new_signing_identity(secret, SigningIdentity::new(credential, public))
+                .build()
+                .unwrap()
+                .commit_message
+                .to_bytes()
+                .unwrap();
+            mallory.clear_pending_commit();
+
+            (change, commit)
+        });
+
+        for (user, member_group) in [(&alice, &group.alice_group), (&bob, &group.bob_group)] {
+            let before = user.store.records();
+
+            for (change, commit) in &leaf_changes {
+                assert!(
+                    matches!(
+                        member_group
+                            .process_incoming_message(commit.clone(), policy.clone())
+                            .unwrap_err(),
+                        MlsError::UnauthorizedChange
+                    ),
+                    "a removal changing {change} must be refused alike"
+                );
+            }
+
+            assert_eq!(user.store.records(), before);
+            assert_eq!(member_group.epoch().unwrap(), epoch);
+        }
+
+        // The removal and nothing more, its update path holding the key
+        // Mallory's leaf had, is applied by both.
+        let removal = group
+            .mallory_group
+            .commit_builder()
+            .remove_member(departed_index)
+            .unwrap()
+            .build()
+            .unwrap()
+            .commit_message
+            .to_bytes()
+            .unwrap();
+
+        for member_group in [&group.alice_group, &group.bob_group] {
+            assert!(matches!(
+                member_group
+                    .process_incoming_message(removal.clone(), policy.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, .. }
+                    if committer_user_uuid == Some(group.mallory_uuid.clone())
+            ));
+            assert!(!member_uuids(member_group).contains(&departed));
+        }
+    }
+
+    #[test]
+    fn test_creating_a_group_leaves_it_at_epoch_1() {
+        // The DuckCount API starts every group at generation 1, the epoch its
+        // creation leaves it in, whose content key its information is sealed
+        // under.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        for group in establish_group(&alice, &[&bob, &carol]) {
+            assert_eq!(group.epoch().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn test_the_content_key_is_what_the_mls_exporter_derives_under_its_label_and_the_group_uuid() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let group = establish_group_with_mallory(&alice, &bob, 0, true);
+
+        let exported = group
+            .mallory_group
+            .export_secret(
+                b"DuckCount 1.0 Group content key",
+                group.group_uuid.as_bytes(),
+                32,
+            )
+            .unwrap();
+
+        for member_group in [&group.alice_group, &group.bob_group] {
+            assert_eq!(
+                member_group.content_key(group.group_uuid.clone()).unwrap(),
+                exported.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_keys_agree_across_members_change_with_every_epoch_and_escape_a_removed_member()
+    {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let content_key = |group: &MlsGroup| group.content_key(group_uuid.clone()).unwrap();
+
+        // Every member derives the one key of the epoch the group was created
+        // in, under its UUID and no other.
+        let created = content_key(alice_group);
+
+        assert_eq!(created.len(), 32);
+        assert_eq!(content_key(bob_group), created);
+        assert_eq!(content_key(carol_group), created);
+        assert_ne!(alice_group.content_key(new_group_uuid()).unwrap(), created);
+
+        // Alice removes Carol: a new key, which Carol, left in the epoch the
+        // removal ended, never derives.
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        for group in [bob_group, carol_group] {
+            group
+                .process_incoming_message(removal.clone(), created_by(&alice))
+                .unwrap();
+        }
+
+        accept(alice_group);
+
+        let removed = content_key(alice_group);
+
+        assert_ne!(removed, created);
+        assert_eq!(content_key(bob_group), removed);
+        assert_eq!(content_key(carol_group), created);
+
+        // Alice adds Dave: a new key again, which Dave derives from his
+        // Welcome.
+        let addition = alice_group
+            .add_members(vec![dave.invitation()], None)
+            .unwrap();
+
+        bob_group
+            .process_incoming_message(addition.commit, created_by(&alice))
+            .unwrap();
+
+        accept(alice_group);
+
+        let dave_group_id = dave
+            .client
+            .join_group(
+                addition.welcome,
+                Some(group_uuid.clone()),
+                uuids(&[&alice, &bob]),
+                true,
+            )
+            .unwrap();
+        let dave_group = dave.client.load_group(dave_group_id).unwrap();
+
+        let added = content_key(alice_group);
+
+        assert_ne!(added, created);
+        assert_ne!(added, removed);
+        assert_eq!(content_key(bob_group), added);
+        assert_eq!(content_key(&dave_group), added);
+    }
+
+    #[test]
+    fn test_the_content_key_after_a_pending_commit_is_its_epochs_and_nothing_is_stored() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, bob_group) = (&groups[0], &groups[1]);
+        let group_id = alice_group.mls_group_id().unwrap();
+
+        // With nothing pending, there is no epoch to derive it for.
+        assert!(matches!(
+            alice_group
+                .content_key_after_pending_commit(group_uuid.clone())
+                .unwrap_err(),
+            MlsError::ProtocolFailed(_)
+        ));
+
+        let current = alice_group.content_key(group_uuid.clone()).unwrap();
+        let epoch = alice_group.epoch().unwrap();
+
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        let before = alice.store.records();
+
+        let next = alice_group
+            .content_key_after_pending_commit(group_uuid.clone())
+            .unwrap();
+
+        // Derived from a copy: nothing was stored, and the group is still in
+        // its epoch with the Commit pending, as it is once loaded again.
+        assert_ne!(next, current);
+        assert_eq!(alice.store.records(), before);
+        assert_eq!(alice_group.epoch().unwrap(), epoch);
+        assert_eq!(
+            alice_group.content_key(group_uuid.clone()).unwrap(),
+            current
+        );
+        assert!(alice_group.has_pending_commit().unwrap());
+
+        let reloaded = alice.reopen().load_group(group_id).unwrap();
+
+        assert_eq!(reloaded.epoch().unwrap(), epoch);
+        assert!(reloaded.has_pending_commit().unwrap());
+
+        // The key the Commit's epoch has once it is applied, for every member.
+        bob_group
+            .process_incoming_message(removal, created_by(&alice))
+            .unwrap();
+
+        accept(alice_group);
+
+        assert_eq!(alice_group.content_key(group_uuid.clone()).unwrap(), next);
+        assert_eq!(bob_group.content_key(group_uuid.clone()).unwrap(), next);
+
+        // So for an addition, whose Welcome opens that epoch.
+        let addition = alice_group
+            .add_members(vec![dave.invitation()], None)
+            .unwrap();
+
+        let next = alice_group
+            .content_key_after_pending_commit(group_uuid.clone())
+            .unwrap();
+
+        accept(alice_group);
+
+        let dave_group_id = dave
+            .client
+            .join_group(
+                addition.welcome,
+                Some(group_uuid.clone()),
+                uuids(&[&alice, &bob]),
+                true,
+            )
+            .unwrap();
+        let dave_group = dave.client.load_group(dave_group_id).unwrap();
+
+        assert_eq!(alice_group.content_key(group_uuid.clone()).unwrap(), next);
+        assert_eq!(dave_group.content_key(group_uuid).unwrap(), next);
     }
 
     #[test]
@@ -1110,7 +1700,7 @@ mod tests {
             .unwrap();
 
         bob_group
-            .process_incoming_message(addition.commit, Some(alice.uuid.clone()))
+            .process_incoming_message(addition.commit, created_by(&alice))
             .unwrap();
         accept(&alice_group);
 
@@ -1591,7 +2181,7 @@ mod tests {
 
         let groups = establish_group(&alice, &[&bob]);
         let (alice_group, bob_group) = (&groups[0], &groups[1]);
-        let creator = Some(alice.uuid.clone());
+        let policy = created_by(&alice);
 
         for discarded in [true, false] {
             let message = bob_group
@@ -1606,7 +2196,7 @@ mod tests {
 
             assert!(matches!(
                 alice_group
-                    .process_incoming_message(message.clone(), creator.clone())
+                    .process_incoming_message(message.clone(), policy.clone())
                     .unwrap_err(),
                 MlsError::GroupStateTooLarge
             ));
@@ -1629,7 +2219,7 @@ mod tests {
 
             assert!(matches!(
                 alice_group
-                    .process_incoming_message(message, creator.clone())
+                    .process_incoming_message(message, policy.clone())
                     .unwrap(),
                 ProcessedMessage::ApplicationMessage { .. }
             ));
@@ -1702,6 +2292,56 @@ mod tests {
 
         assert_eq!(reloaded.epoch().unwrap(), epoch);
         assert_eq!(member_uuids(&reloaded), expected);
+    }
+
+    #[test]
+    fn test_a_removal_of_departed_members_labelled_as_an_application_message_is_not_applied() {
+        // `POST /groups/{uuid}/messages` keeps Commits out by the label it
+        // reads, so Bob, a member, relabels his removal of Carol, who has
+        // left, to have it stored there. Members read it as what it is
+        // labelled, and it fails to open.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol, &dave]);
+        let (alice_group, bob_group, dave_group) = (&groups[0], &groups[1], &groups[3]);
+
+        let policy = commit_policy(&alice.uuid, &[&carol.uuid]);
+        let epoch = alice_group.epoch().unwrap();
+
+        let removal = bob_group.remove_members(vec![carol.uuid.clone()]).unwrap();
+
+        let relabelled = relabelled(
+            removal.clone(),
+            &alice_group.mls_group_id().unwrap(),
+            ContentType::Commit,
+            ContentType::Application,
+        );
+
+        for (user, group) in [(&alice, alice_group), (&dave, dave_group)] {
+            let before = user.store.records();
+
+            assert!(matches!(
+                group
+                    .process_incoming_message(relabelled.clone(), policy.clone())
+                    .unwrap_err(),
+                MlsError::ProtocolFailed(_)
+            ));
+
+            assert_eq!(user.store.records(), before);
+            assert_eq!(group.epoch().unwrap(), epoch);
+            assert_eq!(group.members().unwrap().len(), 4);
+
+            // Refused for its label alone: as Bob sent it, it is applied.
+            assert!(matches!(
+                group
+                    .process_incoming_message(removal.clone(), policy.clone())
+                    .unwrap(),
+                ProcessedMessage::Commit { .. }
+            ));
+        }
     }
 
     #[test]
@@ -2669,7 +3309,7 @@ mod tests {
         accept(&groups[0]);
 
         groups[1]
-            .process_incoming_message(addition.commit, Some(alice.uuid.clone()))
+            .process_incoming_message(addition.commit, created_by(&alice))
             .unwrap();
 
         for user in [&alice, &bob] {
@@ -2719,10 +3359,7 @@ mod tests {
         let (alice_group, bob_group) = establish_group_with_strangers(&alice, &bob, 8);
 
         bob_group
-            .process_incoming_message(
-                last_of_messages(&alice_group, 1000),
-                Some(alice.uuid.clone()),
-            )
+            .process_incoming_message(last_of_messages(&alice_group, 1000), created_by(&alice))
             .unwrap();
 
         let stored = stored_state_len(&bob, &bob_group.mls_group_id().unwrap());
@@ -2733,6 +3370,7 @@ mod tests {
 
     /// A group Alice created, see [`establish_group_with_mallory`].
     struct WithMallory<C: MlsConfig> {
+        group_uuid: String,
         alice_group: Arc<MlsGroup>,
         bob_group: Arc<MlsGroup>,
         mallory_uuid: String,
@@ -2742,11 +3380,13 @@ mod tests {
 
     /// Creates a group of `alice`, `bob`, Mallory, a member playing a plain
     /// mls-rs client, and `stranger_count` members nobody has met, who never
-    /// join, and joins Bob and Mallory to it.
+    /// join, and joins Bob and Mallory to it, Bob pinning everybody if
+    /// `bob_pins_members` says so, and nobody otherwise.
     fn establish_group_with_mallory(
         alice: &TestUser,
         bob: &TestUser,
         stranger_count: usize,
+        bob_pins_members: bool,
     ) -> WithMallory<impl MlsConfig> {
         let group_uuid = new_group_uuid();
 
@@ -2791,13 +3431,19 @@ mod tests {
 
         let joined = bob
             .client
-            .join_group(creation.welcome.clone(), Some(group_uuid), others, true)
+            .join_group(
+                creation.welcome.clone(),
+                Some(group_uuid.clone()),
+                others,
+                bob_pins_members,
+            )
             .unwrap();
 
         let welcome = MlsMessage::from_bytes(&creation.welcome).unwrap();
         let (mallory_group, _) = mallory_client.join_group(None, &welcome, None).unwrap();
 
         WithMallory {
+            group_uuid,
             alice_group: alice.client.load_group(creation.mls_group_id).unwrap(),
             bob_group: bob.client.load_group(joined).unwrap(),
             mallory_uuid,
@@ -2814,7 +3460,7 @@ mod tests {
         mallory: &mut Group<impl MlsConfig>,
         reader: &MlsGroup,
         user: &TestUser,
-        allowed_committer: &str,
+        creator_uuid: &str,
         limit: usize,
     ) {
         let group_id = reader.mls_group_id().unwrap();
@@ -2837,7 +3483,7 @@ mod tests {
 
             if let Err(error) = reader.process_incoming_message(
                 last.unwrap().to_bytes().unwrap(),
-                Some(allowed_committer.to_string()),
+                commit_policy(creator_uuid, &[]),
             ) {
                 assert!(matches!(error, MlsError::GroupStateTooLarge));
 
@@ -2853,9 +3499,9 @@ mod tests {
         let alice = TestUser::new();
         let bob = TestUser::new();
 
-        let mut group = establish_group_with_mallory(&alice, &bob, 5);
+        let mut group = establish_group_with_mallory(&alice, &bob, 5, true);
         let group_id = group.alice_group.mls_group_id().unwrap();
-        let creator = Some(alice.uuid.clone());
+        let policy = created_by(&alice);
 
         flood(
             &mut group.mallory_group,
@@ -2884,7 +3530,7 @@ mod tests {
 
         group
             .bob_group
-            .process_incoming_message(removal, creator.clone())
+            .process_incoming_message(removal, policy.clone())
             .unwrap();
 
         // The keys Mallory had her keep stay with the epoch they were taken
@@ -2897,7 +3543,7 @@ mod tests {
         assert!(matches!(
             group
                 .bob_group
-                .process_incoming_message(message, creator)
+                .process_incoming_message(message, policy)
                 .unwrap(),
             ProcessedMessage::ApplicationMessage { .. }
         ));
@@ -2914,8 +3560,8 @@ mod tests {
             let alice = TestUser::new();
             let bob = TestUser::new();
 
-            let mut group = establish_group_with_mallory(&alice, &bob, MAX_GROUP_MEMBERS - 3);
-            let creator = Some(alice.uuid.clone());
+            let mut group = establish_group_with_mallory(&alice, &bob, MAX_GROUP_MEMBERS - 3, true);
+            let policy = created_by(&alice);
 
             flood(
                 &mut group.mallory_group,
@@ -2933,7 +3579,7 @@ mod tests {
 
             group
                 .bob_group
-                .process_incoming_message(removal, creator.clone())
+                .process_incoming_message(removal, policy.clone())
                 .unwrap();
 
             assert_eq!(group.bob_group.members().unwrap().len(), 3);
@@ -2958,7 +3604,7 @@ mod tests {
             assert!(matches!(
                 group
                     .bob_group
-                    .process_incoming_message(message, creator)
+                    .process_incoming_message(message, policy)
                     .unwrap(),
                 ProcessedMessage::ApplicationMessage { .. }
             ));
@@ -3275,7 +3921,7 @@ mod tests {
             user.client.load_group(group_id).unwrap()
         });
 
-        let creator = Some(alice.uuid.clone());
+        let policy = created_by(&alice);
 
         // Alice removes Carol, and adds her back.
         let removal = alice_group
@@ -3284,7 +3930,7 @@ mod tests {
 
         for group in &joined {
             group
-                .process_incoming_message(removal.clone(), creator.clone())
+                .process_incoming_message(removal.clone(), policy.clone())
                 .unwrap();
         }
 
@@ -3295,7 +3941,7 @@ mod tests {
             .unwrap();
 
         joined[0]
-            .process_incoming_message(addition.commit, creator.clone())
+            .process_incoming_message(addition.commit, policy.clone())
             .unwrap();
 
         accept(&alice_group);
@@ -3364,7 +4010,7 @@ mod tests {
 
         assert!(matches!(
             carol_group
-                .process_incoming_message(message, creator)
+                .process_incoming_message(message, policy)
                 .unwrap(),
             ProcessedMessage::ApplicationMessage { .. }
         ));
@@ -3393,7 +4039,7 @@ mod tests {
         let removal = alice_group.remove_members(vec![bob.uuid.clone()]).unwrap();
 
         bob_group
-            .process_incoming_message(removal, Some(alice.uuid.clone()))
+            .process_incoming_message(removal, created_by(&alice))
             .unwrap();
         bob.client.delete_group(group_id.clone()).unwrap();
 
@@ -4411,29 +5057,36 @@ mod tests {
     }
 
     #[test]
-    fn test_concurrent_commits_converge_on_server_order() {
+    fn test_concurrent_removals_of_a_departed_member_converge_on_server_order() {
+        // Carol has left, and Alice, the creator, and Bob both commit her
+        // removal in the same epoch, neither having seen the other's.
         let alice = TestUser::new();
         let bob = TestUser::new();
+        let carol = TestUser::new();
 
-        let groups = establish_group(&alice, &[&bob]);
+        let groups = establish_group(&alice, &[&bob, &carol]);
         let (alice_group, bob_group) = (&groups[0], &groups[1]);
 
+        let policy = commit_policy(&alice.uuid, &[&carol.uuid]);
         let epoch_before = alice_group.epoch().unwrap();
 
-        // Both members commit in the same epoch, neither having seen the other.
-        let alice_commit = alice_group.update().unwrap();
-        let bob_commit = bob_group.update().unwrap();
+        let alice_commit = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+        let bob_commit = bob_group.remove_members(vec![carol.uuid.clone()]).unwrap();
 
-        // The server happens to store Bob's first, so Bob's wins for everyone.
+        // The server stores Bob's, which came first, so Bob's wins for
+        // everyone.
         assert!(matches!(
             alice_group
-                .process_incoming_message(bob_commit, None)
+                .process_incoming_message(bob_commit, policy.clone())
                 .unwrap(),
-            ProcessedMessage::Commit { .. }
+            ProcessedMessage::Commit { committer_user_uuid, .. }
+                if committer_user_uuid == Some(bob.uuid.clone())
         ));
 
         // Applying the winning commit discards Alice's, which simply never
-        // happened; she has to reissue it if she still wants it.
+        // happened, and removed nobody Bob's did not.
         assert!(!alice_group.has_pending_commit().unwrap());
 
         accept(bob_group);
@@ -4441,10 +5094,16 @@ mod tests {
         assert_eq!(alice_group.epoch().unwrap(), epoch_before + 1);
         assert_eq!(bob_group.epoch().unwrap(), epoch_before + 1);
 
+        let mut expected = uuids(&[&alice, &bob]);
+        expected.sort();
+
+        assert_eq!(member_uuids(alice_group), expected);
+        assert_eq!(member_uuids(bob_group), expected);
+
         // Bob rejects Alice's now-stale commit rather than forking.
         assert!(
             bob_group
-                .process_incoming_message(alice_commit, None)
+                .process_incoming_message(alice_commit, policy.clone())
                 .is_err()
         );
 
@@ -4455,7 +5114,7 @@ mod tests {
 
         assert!(matches!(
             alice_group
-                .process_incoming_message(ciphertext, None)
+                .process_incoming_message(ciphertext, policy)
                 .unwrap(),
             ProcessedMessage::ApplicationMessage { .. }
         ));
@@ -4564,6 +5223,52 @@ mod tests {
         bob_group.process_incoming_message(commit, None).unwrap();
 
         let mut expected = vec![alice.uuid.clone(), bob.uuid.clone()];
+        expected.sort();
+
+        assert_eq!(member_uuids(alice_group), expected);
+        assert_eq!(member_uuids(bob_group), expected);
+    }
+
+    #[test]
+    fn test_a_member_deleting_their_account_is_removed_by_another_members_commit_not_by_their_proposal()
+     {
+        // Carol is deleting her account, and proposes her own removal, which
+        // members holding to a commit policy refuse. Once she has departed,
+        // Bob, a member, commits her removal while Alice, the creator, is
+        // away.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let groups = establish_group(&alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let policy = commit_policy(&alice.uuid, &[&carol.uuid]);
+
+        let proposal = carol_group.propose_self_remove().unwrap();
+
+        for group in [alice_group, bob_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(proposal.clone(), policy.clone())
+                    .unwrap_err(),
+                MlsError::UnauthorizedChange
+            ));
+        }
+
+        let removal = bob_group.remove_members(vec![carol.uuid.clone()]).unwrap();
+
+        assert!(matches!(
+            alice_group
+                .process_incoming_message(removal, policy)
+                .unwrap(),
+            ProcessedMessage::Commit { committer_user_uuid, .. }
+                if committer_user_uuid == Some(bob.uuid.clone())
+        ));
+
+        accept(bob_group);
+
+        let mut expected = uuids(&[&alice, &bob]);
         expected.sort();
 
         assert_eq!(member_uuids(alice_group), expected);

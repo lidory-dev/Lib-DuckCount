@@ -45,8 +45,9 @@ pub(crate) const MAX_GROUP_STATE_LEN: usize = 512 * 1024;
 ///
 /// A group's state grows with its members too: each member keeps the whole
 /// ratchet tree, some 3 KB a member where only the creator commits, as in a
-/// group the DuckCount API holds, and 4 KB where every member has committed
-/// once, and a Commit pending takes some 8 KB a member more, see
+/// group the DuckCount API holds whose other members never had a departed
+/// member to remove, and 4 KB where every member has committed once, and a
+/// Commit pending takes some 8 KB a member more, see
 /// [`COMMIT_ROOM_PER_MEMBER`]. Twelve KiB a member leaves a group whose
 /// creator alone commits as much room for skipped keys at rest as a group of
 /// two has, some 480 KB, up to a hundred, and one whose every member has

@@ -309,11 +309,13 @@ impl MlsClient {
     /// Each invitee's signature key is pinned to them either way.
     ///
     /// `welcome_payload` is how the host hands the invitees what they need
-    /// beside the group itself, such as the key its own fields are sealed
-    /// with. It travels inside the Welcome, encrypted to them and signed by
-    /// this user, and each reads it back from
-    /// [`WelcomeInspection::welcome_payload`]. This library does not look
-    /// inside.
+    /// beside the group itself, such as the keys to its members' profiles. It
+    /// travels inside the Welcome, encrypted to them and signed by this user,
+    /// and each reads it back from [`WelcomeInspection::welcome_payload`].
+    /// This library does not look inside. The key the group's own fields are
+    /// sealed under is not for it to carry: every member derives it from the
+    /// epoch they are in, see
+    /// [`MlsGroup::content_key`](crate::cryptography::mls::group::MlsGroup::content_key).
     ///
     /// The group's id is derived from `group_uuid`, see [`group_id`], which
     /// the invitees join it as.

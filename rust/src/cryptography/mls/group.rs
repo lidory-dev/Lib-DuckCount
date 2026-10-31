@@ -19,10 +19,29 @@
 //!
 //! # Concurrent commits
 //!
-//! MLS allows exactly one Commit per epoch, and the DuckCount API does not
-//! serialise them, it stores whatever arrives. Two members committing at once
+//! MLS allows exactly one Commit per epoch. Two members committing at once
 //! would fork the group, so clients converge on one rule: **the first Commit in
 //! server order wins.**
+//!
+//! The DuckCount API stores one Commit for each epoch of a group it holds, and
+//! only through the routes that change the group's members: each reads the
+//! epoch a Commit is for from its cleartext header, and stores it only for the
+//! epoch the group is in, refusing any other with a 409 naming that epoch.
+//! `POST /groups/{uuid}/messages` refuses whatever that header does not name
+//! an application message. A Commit stored there would take every member who
+//! applied it to an epoch the server never counted, and the server would
+//! refuse whatever they wrote from then on, as written for an epoch the group
+//! is not in. A Commit relabelled to get through is read as an application
+//! message, the label being authenticated with it, and fails to open, see
+//! [`read_application_message`](MlsGroup::read_application_message) and
+//! [`process_incoming_message`](MlsGroup::process_incoming_message).
+//!
+//! The member whose Commit was refused clears it, see
+//! [`clear_pending_commit`](MlsGroup::clear_pending_commit), and reads the one
+//! stored before it. The one exception is the creator replacing another
+//! member's Commit that their device refused: the server then stores the
+//! creator's after it, for the same epoch, and a member who refused the first
+//! applies the second.
 //!
 //! That order is observable and identical for everyone, since
 //! `GET /groups/{uuid}/messages` returns rows by ascending id. Processing them
@@ -31,13 +50,19 @@
 //! the pending commit automatically; the local change simply did not happen and
 //! has to be reissued.
 //!
-//! In a group the DuckCount API holds, only its creator commits, and every
-//! member refuses a Commit from anybody else, see
+//! In a group the DuckCount API holds, its creator commits whatever they
+//! change, and any other member only the removal of members who have
+//! departed, which is how a member who left is cut off while the creator's
+//! phone is offline. Such a removal has to remove exactly the members the
+//! server stored it with, who it checked had departed: the host passes their
+//! list with each message, and every member decides on it alike, see
+//! [`CommitPolicy`]. Every member refuses any other Commit, see
 //! [`process_incoming_message`](MlsGroup::process_incoming_message). A refused
-//! Commit applies nothing and clears nothing, a Commit of the creator's still
-//! pending included, so the creator's never lose to another member's: what
-//! can still compete is two members of a group with no such rule calling
-//! [`update`](MlsGroup::update).
+//! Commit applies nothing and clears nothing, a Commit of this user's still
+//! pending included. What can compete, then, is a Commit of the creator's and
+//! another member's removal of somebody who departed, or two such removals:
+//! the one the server stored is the one every member applies, a Commit of
+//! their own still pending cleared as they apply it.
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -48,7 +73,7 @@ use mls_rs_core::crypto::SignaturePublicKey;
 
 use crate::cryptography::mls::{
     MAX_GROUP_MEMBERS, MlsError,
-    config::{DuckCountMlsConfig, with_allowed_committer},
+    config::{DuckCountMlsConfig, with_commit_policy},
     identity::{credential::user_uuid_from, fingerprint::fingerprint},
     invitation::{pin_invitees, shared_welcome, validate_invitees, welcome_payload_extensions},
     storage::{
@@ -56,7 +81,8 @@ use crate::cryptography::mls::{
         identity_pin::IdentityPinStore,
     },
     types::{
-        AddMembersOutput, ApplicationMessage, InviteeKeyPackage, MemberInfo, ProcessedMessage,
+        AddMembersOutput, ApplicationMessage, CommitPolicy, InviteeKeyPackage, MemberInfo,
+        ProcessedMessage,
     },
 };
 
@@ -90,6 +116,84 @@ impl MlsGroup {
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     pub fn epoch(&self) -> Result<u64, MlsError> {
         Ok(self.locked()?.current_epoch())
+    }
+
+    /// The content key of the epoch the group is in: what the group's
+    /// information and expenses are sealed under in this epoch, the key of
+    /// the generation numbered as the epoch is.
+    ///
+    /// It is what the MLS exporter derives under the label
+    /// `DuckCount 1.0 Group content key`, with the group's UUID for context,
+    /// 32 bytes of it. Every member in the epoch therefore derives the same
+    /// key, and nobody else can: not the server, which holds no secret of the
+    /// group's, and not a member a Commit removed, who stays in the epoch it
+    /// ended. Nor does any member choose it, as they would a key they handed
+    /// out: it comes from the epoch's secrets, which the committer's update
+    /// path goes into but does not decide.
+    ///
+    /// mls-rs keeps the exporter of the epoch the group is in and of no other,
+    /// so the host derives the key at every epoch the group reaches, as it is
+    /// created or joined and as each Commit is applied, and keeps it: the key
+    /// of an epoch that has ended can no longer be derived.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_uuid` - The UUID the DuckCount API holds the group under, in
+    ///   canonical hyphenated lowercase form, as the API writes it.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<u8>, MlsError>` - The 32-byte key.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If the key cannot be derived.
+    pub fn content_key(&self, group_uuid: String) -> Result<Vec<u8>, MlsError> {
+        let group = self.locked()?;
+
+        exported_content_key(&group, &group_uuid)
+    }
+
+    /// The content key of the epoch the pending Commit leads to, see
+    /// [`content_key`](Self::content_key), before the server accepts it.
+    ///
+    /// For a committer who sends, with the Commit, what is sealed under that
+    /// epoch's key, the link back from it to the key of the epoch the group
+    /// is in above all, so that the server stores them together. It is
+    /// derived from a copy of the group with the Commit applied, which is
+    /// dropped once the key is read: nothing is stored, and the group stays in
+    /// the epoch it is in, the Commit pending until the host applies or
+    /// discards it as the server decides. Once applied,
+    /// [`content_key`](Self::content_key) gives the same key.
+    ///
+    /// # Arguments
+    ///
+    /// * `group_uuid` - As on [`content_key`](Self::content_key).
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<u8>, MlsError>` - The 32-byte key.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If no Commit is pending, or the key
+    ///   cannot be derived.
+    /// * `MlsError::StorageFailed` - If the host storage fails as the epochs
+    ///   the group retains are looked up, which applying the Commit does.
+    pub fn content_key_after_pending_commit(
+        &self,
+        group_uuid: String,
+    ) -> Result<Vec<u8>, MlsError> {
+        // mls-rs keeps what applying a Commit writes, the record of the epoch
+        // it ends above all, in the group until the group is written to
+        // storage, which the copy never is.
+        let mut next = self.locked()?.clone();
+
+        next.apply_pending_commit()?;
+
+        exported_content_key(&next, &group_uuid)
     }
 
     /// The group's current members.
@@ -162,16 +266,21 @@ impl MlsGroup {
     /// this device trusts them. The host joins such a group only from a
     /// Welcome its creator wrote, once it has pinned them, their leaf in it
     /// checked against that pin, see [`MlsClient::join_group`], so the tree it
-    /// opens is the creator's word. Every change to its members since is a
-    /// Commit of theirs, its members refusing anybody else's and every
-    /// Proposal, see [`process_incoming_message`](Self::process_incoming_message).
-    /// And the creator's host seats only contacts it has pinned, each checked
-    /// against that pin as [`MlsClient::create_group`] or
-    /// [`add_members`](Self::add_members) adds them. Both pin anybody not
-    /// pinned yet from whichever key package the server served, and a member
-    /// seated that way would hold a key resting on the server's word alone,
-    /// which is why a host never seats one. The key a member holds in a group
-    /// this device joined is the one its creator vouched for.
+    /// opens is the creator's word. Every member seated since was seated by a
+    /// Commit of theirs: its members refuse every Proposal, and any other
+    /// member's Commit but one removing members who have departed, see
+    /// [`process_incoming_message`](Self::process_incoming_message). Such a
+    /// removal seats nobody, and the update path it carries is its
+    /// committer's own, held to the key their leaf already had, see
+    /// `check_member_committer_leaf` in `config.rs`, so every key in the tree is
+    /// still one the creator seated. And the creator's host seats only
+    /// contacts it has pinned, each checked against that pin as
+    /// [`MlsClient::create_group`] or [`add_members`](Self::add_members) adds
+    /// them. Both pin anybody not pinned yet from whichever key package the
+    /// server served, and a member seated that way would hold a key resting on
+    /// the server's word alone, which is why a host never seats one. The key a
+    /// member holds in a group this device joined is the one its creator
+    /// vouched for.
     ///
     /// It pins, and does not just check: the key stays pinned even if the
     /// request then fails. A pin is what every later appearance of theirs is
@@ -427,12 +536,15 @@ impl MlsGroup {
     ///
     /// Nothing about the membership changes; what changes is that any secret an
     /// attacker may have captured stops being useful, which is the whole point
-    /// of doing it periodically. There is no dedicated API route, send the
-    /// Commit through `POST /groups/{uuid}/messages` like any other message.
+    /// of doing it periodically. The DuckCount API stores such a Commit only
+    /// through `POST /groups/{uuid}/commits/replacement`: the creator's device
+    /// sends one there when it replaces a Commit nobody could apply and has
+    /// nobody to remove with it. `POST /groups/{uuid}/messages` refuses it, see
+    /// the module documentation on concurrent commits.
     ///
-    /// Members allowing a single committer, see
+    /// Members holding to a commit policy, see
     /// [`process_incoming_message`](Self::process_incoming_message), refuse it
-    /// from anybody else.
+    /// from anybody but the group's creator.
     ///
     /// # Returns
     ///
@@ -464,14 +576,16 @@ impl MlsGroup {
     ///
     /// This returns a **proposal**, not a Commit. RFC 9420 does not let a member
     /// commit their own removal, so the user stays in the group until a
-    /// remaining member commits this proposal after receiving it. The DuckCount
-    /// API calls the corresponding field a "commit" in
-    /// `PUT /users/{uuid}/deletion`, but it relays the bytes without inspecting
-    /// them, so the proposal travels there unchanged.
+    /// remaining member commits it. No route of the DuckCount API stores the
+    /// proposal, `POST /groups/{uuid}/messages` refusing it as it refuses a
+    /// Commit, see the module documentation on concurrent commits: a user who
+    /// leaves a group or deletes their account is listed to its members as
+    /// departed instead, and a remaining member commits their removal.
     ///
-    /// Members allowing a single committer, see
+    /// Members holding to a commit policy, see
     /// [`process_incoming_message`](Self::process_incoming_message), refuse it:
-    /// there, the user is out once that member removes them.
+    /// there, the user is out once a member commits their removal, the
+    /// group's creator or, once the user has departed, any member.
     ///
     /// # Returns
     ///
@@ -532,28 +646,58 @@ impl MlsGroup {
     ///
     /// An application message is read whichever member sent it. A Commit is
     /// applied and a Proposal kept, whichever member sent them, unless
-    /// `allowed_committer` names the one member who may change the group: a
-    /// Commit from anybody else is then refused, and so is every Proposal,
-    /// that member's own included. A group whose members never change is read
-    /// with [`read_application_message`](Self::read_application_message)
-    /// instead.
+    /// `policy` says who may change the group: its creator, whose Commits are
+    /// applied whatever they change, and any other member only to remove
+    /// exactly the departed members the server stored the Commit with. Any
+    /// other Commit is then refused, and so is every Proposal, the creator's
+    /// own included. A group whose members never change is read with
+    /// [`read_application_message`](Self::read_application_message) instead.
     ///
     /// The members of a group the DuckCount API holds name its creator, who
-    /// alone adds and removes members. A Commit from anybody else would add or
-    /// remove whoever they chose, and a Proposal is of no use to the creator,
-    /// who commits what they change themselves: kept, it would stop the group
-    /// sending until somebody committed it, and be committed along with the
-    /// creator's next change, adding or removing somebody they never chose. A
-    /// departing member's proposal to remove themselves goes the same way: it
-    /// is for the creator to remove them.
+    /// adds and removes members. A Commit from anybody else would add or
+    /// remove whoever they chose, but for one removing members who left the
+    /// group or deleted their account: those still read whatever the group
+    /// writes until somebody commits their removal, which, were it the
+    /// creator's alone to commit, would wait for as long as the creator's
+    /// phone is offline, days on end at times. Any member's removal of them is
+    /// therefore applied, provided it removes the members the server stored it
+    /// with, the policy's `departed_uuids`, all of them and nobody else. The
+    /// server stores such a Commit only through `DELETE /groups/{uuid}/departed`,
+    /// once it has checked each member it names has departed, and counts them
+    /// as removed from then on: a Commit removing only some of them would
+    /// leave in the tree the leaf of a member the server counts as gone, which
+    /// nobody could then remove. Every member refuses it, deciding on the
+    /// server's list for that message and not on their own view of who has
+    /// departed, so all decide alike, and the creator replaces it. With any
+    /// other message the server names nobody, and any member's Commit but the
+    /// creator's is refused.
     ///
-    /// A Commit from anybody else is refused before mls-rs checks anything it
-    /// carries, the members it adds or updates above all: whoever may not
-    /// commit gets no other error than this one out of it, nor one naming a
-    /// member of their choosing, such as an `IdentityKeyMismatch` for a
-    /// contact of this user's whose key never changed. Only what fails before
-    /// mls-rs gets to what the Commit changes, authentication above all, is
-    /// refused otherwise, with an error that names nobody.
+    /// Who has departed is the server's word, as it is the server that tells
+    /// of a leave: a server naming somebody who never left lets any member
+    /// remove them, which is no more than the server can do already, since
+    /// whatever reaches a member is the server's to deliver.
+    ///
+    /// A Proposal is of no use to the creator, who commits what they change
+    /// themselves: kept, it would stop the group sending until somebody
+    /// committed it, and be committed along with the creator's next change,
+    /// adding or removing somebody they never chose. A departing member's
+    /// proposal to remove themselves goes the same way: it is for a member
+    /// still in the group to remove them.
+    ///
+    /// A Commit the policy does not allow is refused before mls-rs checks
+    /// anything it carries, the members it adds or updates above all: whoever
+    /// may not commit it gets no other error than this one out of it, nor one
+    /// naming a member of their choosing, such as an `IdentityKeyMismatch` for
+    /// a contact of this user's whose key never changed. Only what fails
+    /// before mls-rs gets to what the Commit changes, authentication above
+    /// all, is refused otherwise, with an error that names nobody. A removal
+    /// of the departed whose update path gives its committer a leaf other
+    /// than theirs, a signature key of their own making or another member's
+    /// name, is refused with this error too, by every member alike, before
+    /// that leaf is checked against any pin: left to the pins, it would be
+    /// refused one way by the members who have a key pinned for whoever it
+    /// names, the creator among them for anybody they seated, and another way
+    /// by the rest, and the creator, waiting on it, would never replace it.
     ///
     /// A refused message stores nothing and leaves the group as it was, a
     /// Commit of this user's still pending included: the next message is
@@ -568,9 +712,10 @@ impl MlsGroup {
     /// # Arguments
     ///
     /// * `message` - The ciphertext from `GET /groups/{uuid}/messages`.
-    /// * `allowed_committer` - The UUID of the only member whose Commits are
-    ///   applied, in canonical hyphenated lowercase form, or `None` to apply
-    ///   any member's, and keep their Proposals.
+    /// * `policy` - Whose Commits are applied, by user UUIDs in canonical
+    ///   hyphenated lowercase form, with the departed members the server
+    ///   stored this message with, or `None` to apply any member's, and keep
+    ///   their Proposals.
     ///
     /// # Returns
     ///
@@ -578,9 +723,10 @@ impl MlsGroup {
     ///
     /// # Errors
     ///
-    /// * `MlsError::UnauthorizedChange` - If `allowed_committer` is given and
-    ///   the message is a Commit from anybody else, or a Proposal. Nothing is
-    ///   stored.
+    /// * `MlsError::UnauthorizedChange` - If `policy` is given and the message
+    ///   is a Commit it does not allow, one from a member other than the
+    ///   creator whose update path does not keep the leaf they had included,
+    ///   or a Proposal. Nothing is stored.
     /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or was not
     ///   encrypted to the group.
     /// * `MlsError::GroupStateTooLarge` - If what the message did would grow
@@ -590,15 +736,18 @@ impl MlsGroup {
     ///   until then, see [`MlsError::GroupStateTooLarge`].
     /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
     ///   from the one pinned for them: a member the Commit adds or updates,
-    ///   from the committer allowed if one is given.
+    ///   from the creator if `policy` is given.
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     /// * `MlsError::ProtocolFailed` - If the message belongs to another group, is
-    ///   for an epoch too old to still be retained, or fails authentication.
+    ///   for an epoch too old to still be retained, or fails authentication,
+    ///   or if it is a Commit whose committer's update path holds a signature
+    ///   key other than the one their leaf had, from the creator if `policy`
+    ///   is given, and no key is pinned for them.
     /// * `MlsError::StorageFailed` - If the resulting state cannot be stored.
     pub fn process_incoming_message(
         &self,
         message: Vec<u8>,
-        allowed_committer: Option<String>,
+        policy: Option<CommitPolicy>,
     ) -> Result<ProcessedMessage, MlsError> {
         let message = MlsMessage::from_bytes(&message).map_err(|_| MlsError::InvalidMessage)?;
 
@@ -612,10 +761,10 @@ impl MlsGroup {
             return Err(MlsError::InvalidMessage);
         }
 
+        let refuses_proposals = policy.is_some();
+
         self.change_and_store(|group| {
-            let received = with_allowed_committer(allowed_committer.clone(), || {
-                group.process_incoming_message(message)
-            })?;
+            let received = with_commit_policy(policy, || group.process_incoming_message(message))?;
 
             let processed = match received {
                 ReceivedMessage::ApplicationMessage(description) => {
@@ -637,7 +786,7 @@ impl MlsGroup {
                     epoch: group.current_epoch(),
                     removed_self: matches!(description.effect, CommitEffect::Removed { .. }),
                 },
-                ReceivedMessage::Proposal(_) if allowed_committer.is_some() => {
+                ReceivedMessage::Proposal(_) if refuses_proposals => {
                     return Err(MlsError::UnauthorizedChange);
                 }
                 ReceivedMessage::Proposal(description) => ProcessedMessage::Proposal {
@@ -885,6 +1034,32 @@ impl MlsGroup {
             .member_at_index(index)
             .and_then(|member| user_uuid_from(&member.signing_identity.credential).ok())
     }
+}
+
+/// The label every content key is exported under, see
+/// [`MlsGroup::content_key`].
+///
+/// What MLS exports under one label is independent of what it exports under
+/// any other, so nothing else a DuckCount group exports, now or later, is ever
+/// one of these keys.
+const CONTENT_KEY_LABEL: &[u8] = b"DuckCount 1.0 Group content key";
+
+/// The length of a content key, in bytes: a 256-bit key, for the AEAD the
+/// group's information and expenses are sealed with.
+const CONTENT_KEY_LEN: usize = 32;
+
+/// The content key of the epoch `group` is in, see [`MlsGroup::content_key`].
+///
+/// # Errors
+///
+/// * `MlsError::ProtocolFailed` - If the key cannot be derived.
+fn exported_content_key(
+    group: &Group<DuckCountMlsConfig>,
+    group_uuid: &str,
+) -> Result<Vec<u8>, MlsError> {
+    let key = group.export_secret(CONTENT_KEY_LABEL, group_uuid.as_bytes(), CONTENT_KEY_LEN)?;
+
+    Ok(key.as_bytes().to_vec())
 }
 
 /// Stores `group` at rest, holding it to what a group of the members it has

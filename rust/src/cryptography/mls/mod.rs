@@ -129,9 +129,11 @@ pub enum MlsError {
     /// this library produces.
     InvalidMessage,
     /// A message would change a group in a way the host does not allow: a
-    /// Commit from a member other than the one allowed to commit, refused
-    /// before anything it carries is checked, or a Proposal, which no member
-    /// may send where one is, see
+    /// Commit the commit policy the host holds the group to does not allow,
+    /// refused before anything it carries is checked, or before the leaf its
+    /// update path gives a committer other than the creator is checked against
+    /// any pin, or a Proposal, which no member may send where a policy is
+    /// held, see
     /// [`process_incoming_message`](group::MlsGroup::process_incoming_message).
     /// Nothing was stored, and the group is as it was.
     UnauthorizedChange,

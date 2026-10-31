@@ -3,7 +3,8 @@
 //! A group's title, description and currency are sealed under the group's key,
 //! which every member holds, so a seal says nothing about who wrote it: any
 //! member can seal a title of their own. Only the group's owner may change its
-//! information, though: its creator, who alone changes who is in it too, see
+//! information, though: its creator, who alone adds members and removes them
+//! too, but for members who have departed, whom any member may remove, see
 //! [`group`](super::group). The owner therefore signs each version with their
 //! MLS identity key, and a member shows a version only when that signature
 //! checks out under the key they hold for the owner. Nobody else can sign one:
@@ -13,11 +14,12 @@
 //! # What is signed
 //!
 //! What the fields open to, and not the sealed bytes the server stores: the
-//! group's key is rotated whenever a member is removed, every field sealed
-//! again under the new one, and a version signed in the clear says the same
-//! under either key, its signature as good after a rotation as before. A
-//! member therefore opens a version before checking it, which is unlike a
-//! one-time expense, see [`one_time_expense`](super::one_time_expense).
+//! group's key changes with every epoch, each version staying sealed under
+//! the key of the epoch it was written in, and a version signed in the clear
+//! is checked the same whichever key it is sealed under, by a member who
+//! opens it through the keys before their own as by one who held its key
+//! all along. A member therefore opens a version before checking it, which
+//! is unlike a one-time expense, see [`one_time_expense`](super::one_time_expense).
 //!
 //! The group's UUID is signed too, since nothing else ties a version to its
 //! group: somebody in two groups of the same owner holds both keys, and could
@@ -56,7 +58,8 @@ pub struct GroupInformation {
     pub group_uuid: String,
     /// 1 for the version the group was created with, one more for each edit,
     /// so that a member can refuse to go back to a version older than one it
-    /// has shown. Rotating the group's key leaves it as it was.
+    /// has shown. A new epoch, and the key that comes with it, leaves it as
+    /// it was.
     pub revision: u64,
     pub title: String,
     pub description: String,
