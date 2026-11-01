@@ -27,6 +27,20 @@ mod tests {
     const OTHER_PASSWORD: &str = "Cu2ScxGK0tvMA^6MBz3@";
     const NEW_PASSWORD: &str = "q8;Wd(Rk3%Zt_Hn7]Lb#";
 
+    /// The login context as DuckCount-API holds it. Spelled out here rather than
+    /// read from the lib, so that changing the lib's alone fails every login
+    /// below.
+    const SERVER_CONTEXT: &[u8] = b"duckcount:opaque:v1";
+
+    /// What the server logs in under, as `opaque_login_parameters` in
+    /// DuckCount-API.
+    fn server_parameters() -> ServerLoginParameters<'static, 'static> {
+        ServerLoginParameters {
+            context: Some(SERVER_CONTEXT),
+            ..Default::default()
+        }
+    }
+
     /// Runs a whole OPAQUE registration against an in-process server, returning
     /// what each side ends up holding: the client's finish result (which carries
     /// the vault root key, in the clear and sealed) and the server's password
@@ -81,6 +95,16 @@ mod tests {
         password: &str,
         password_file_bytes: &[u8],
     ) -> Result<Login, AuthenticationError> {
+        try_log_in_under(server_setup, password, password_file_bytes, SERVER_CONTEXT)
+    }
+
+    /// [try_log_in], against a server holding `context`.
+    fn try_log_in_under(
+        server_setup: &ServerSetup<DefaultCipherSuite>,
+        password: &str,
+        password_file_bytes: &[u8],
+        context: &[u8],
+    ) -> Result<Login, AuthenticationError> {
         let login = Login::new();
 
         let credential_request_bytes = login.start(password).unwrap();
@@ -94,7 +118,10 @@ mod tests {
             Some(password_file),
             CredentialRequest::deserialize(&credential_request_bytes).unwrap(),
             USERNAME.as_bytes(),
-            ServerLoginParameters::default(),
+            ServerLoginParameters {
+                context: Some(context),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -125,7 +152,7 @@ mod tests {
             Some(password_file),
             CredentialRequest::deserialize(&start_result.credential_request).unwrap(),
             USERNAME.as_bytes(),
-            ServerLoginParameters::default(),
+            server_parameters(),
         )
         .unwrap();
 
@@ -182,7 +209,7 @@ mod tests {
             .finish(
                 CredentialFinalization::deserialize(&finish_result.credential_finalization)
                     .unwrap(),
-                ServerLoginParameters::default(),
+                server_parameters(),
             )
             .unwrap();
 
@@ -332,6 +359,59 @@ mod tests {
                 Err(AuthenticationError::CredentialResponseDeserializationFailed)
             ));
         }
+    }
+
+    /// A server on another configuration holds another context, or none, and
+    /// the login does not complete: the right password opens the envelope, but
+    /// the server's proof does not verify. The round trips above show the login
+    /// does complete under the context the server does hold.
+    #[test]
+    fn test_a_login_fails_against_a_server_under_another_context() {
+        let server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut OsRng);
+
+        let (_, password_file) = register(&server_setup, PASSWORD);
+
+        for context in [b"".as_slice(), b"duckcount:opaque:v2".as_slice()] {
+            assert!(matches!(
+                try_log_in_under(&server_setup, PASSWORD, &password_file, context),
+                Err(AuthenticationError::ClientLoginFinalizationFailed(_))
+            ));
+        }
+    }
+
+    /// A re-authentication runs under the server's context as a login does, and
+    /// both ends accept each other's proof.
+    #[test]
+    fn test_a_reauth_completes_under_the_servers_context() {
+        let server_setup = ServerSetup::<DefaultCipherSuite>::new(&mut OsRng);
+
+        let (_, password_file) = register(&server_setup, PASSWORD);
+
+        let reauth = ReAuth::new();
+
+        let credential_request_bytes = reauth.start(PASSWORD).unwrap();
+
+        let server_start = ServerLogin::start(
+            &mut OsRng,
+            &server_setup,
+            Some(ServerRegistration::<DefaultCipherSuite>::deserialize(&password_file).unwrap()),
+            CredentialRequest::deserialize(&credential_request_bytes).unwrap(),
+            USERNAME.as_bytes(),
+            server_parameters(),
+        )
+        .unwrap();
+
+        let finalization = reauth
+            .finish(&server_start.message.serialize().to_vec(), PASSWORD)
+            .unwrap();
+
+        server_start
+            .state
+            .finish(
+                CredentialFinalization::deserialize(&finalization).unwrap(),
+                server_parameters(),
+            )
+            .unwrap();
     }
 
     /// The point of a password change: the user keeps the root key they have,

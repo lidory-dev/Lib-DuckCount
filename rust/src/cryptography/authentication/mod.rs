@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use opaque_ke::{
-    CipherSuite,
+    CipherSuite, ClientLoginFinishParameters,
     errors::InternalError,
     generic_array::{ArrayLength, GenericArray},
     ksf::Ksf,
@@ -28,6 +28,25 @@ impl CipherSuite for DefaultCipherSuite {
     // >;
 
     type Ksf = PasswordStretching;
+}
+
+/// What both sides mix into the transcript of every login, re-authentications
+/// included, so that one only completes between two ends that agree on this
+/// protocol and its configuration: a new cipher suite moves it to `v2`, and an
+/// end still on the old one cannot finish a login.
+///
+/// It never goes over the wire. DuckCount-API holds the same string, and a
+/// difference between the two fails every login the way a wrong password does.
+pub(crate) const LOGIN_CONTEXT: &[u8] = b"duckcount:opaque:v1";
+
+/// The parameters of every login's finish step: [LOGIN_CONTEXT], the suite's
+/// defaults otherwise.
+pub(crate) fn login_finish_parameters()
+-> ClientLoginFinishParameters<'static, 'static, 'static, DefaultCipherSuite> {
+    ClientLoginFinishParameters {
+        context: Some(LOGIN_CONTEXT),
+        ..Default::default()
+    }
 }
 
 /// What each guess at a password costs: 64 MiB and 3 passes of Argon2id, on one

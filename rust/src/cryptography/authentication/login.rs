@@ -1,11 +1,13 @@
 use std::sync::Mutex;
 
-use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
+use opaque_ke::{ClientLogin, CredentialResponse};
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::{
-    authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
+    authentication::{
+        AuthenticationError, DefaultCipherSuite, login_finish_parameters, root_key_wrapping_key,
+    },
     encryption::{decrypt::decrypt_using_symmetric_key, encrypted_field::EncryptedField},
 };
 
@@ -129,7 +131,7 @@ impl Login {
                 password.as_bytes(),
                 CredentialResponse::deserialize(credential_response_bytes)
                     .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
-                ClientLoginFinishParameters::default(),
+                login_finish_parameters(),
             )
             .map_err(|error| {
                 AuthenticationError::ClientLoginFinalizationFailed(error.to_string())

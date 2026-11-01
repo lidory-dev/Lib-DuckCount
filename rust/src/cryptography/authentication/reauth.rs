@@ -1,10 +1,12 @@
 use std::sync::Mutex;
 
-use opaque_ke::{ClientLogin, ClientLoginFinishParameters, CredentialResponse};
+use opaque_ke::{ClientLogin, CredentialResponse};
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::cryptography::authentication::{AuthenticationError, DefaultCipherSuite};
+use crate::cryptography::authentication::{
+    AuthenticationError, DefaultCipherSuite, login_finish_parameters,
+};
 
 /// Represents a client-side OPAQUE login session.
 ///
@@ -102,7 +104,7 @@ impl ReAuth {
                 password.as_bytes(),
                 CredentialResponse::deserialize(credential_response_bytes)
                     .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
-                ClientLoginFinishParameters::default(),
+                login_finish_parameters(),
             )
             .map_err(|error| {
                 AuthenticationError::ClientLoginFinalizationFailed(error.to_string())

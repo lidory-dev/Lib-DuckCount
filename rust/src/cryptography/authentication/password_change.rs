@@ -1,14 +1,16 @@
 use std::sync::Mutex;
 
 use opaque_ke::{
-    ClientLogin, ClientLoginFinishParameters, ClientRegistration,
-    ClientRegistrationFinishParameters, CredentialResponse, RegistrationResponse,
+    ClientLogin, ClientRegistration, ClientRegistrationFinishParameters, CredentialResponse,
+    RegistrationResponse,
 };
 use rand::rngs::OsRng;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cryptography::{
-    authentication::{AuthenticationError, DefaultCipherSuite, root_key_wrapping_key},
+    authentication::{
+        AuthenticationError, DefaultCipherSuite, login_finish_parameters, root_key_wrapping_key,
+    },
     encryption::{encrypt::encrypt_using_symmetric_key, encrypted_field::EncryptedField},
 };
 
@@ -255,7 +257,7 @@ impl PasswordChange {
                 current_password.as_bytes(),
                 CredentialResponse::deserialize(&credential_response_bytes)
                     .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
-                ClientLoginFinishParameters::default(),
+                login_finish_parameters(),
             )
             .map_err(|error| {
                 AuthenticationError::ClientLoginFinalizationFailed(error.to_string())
