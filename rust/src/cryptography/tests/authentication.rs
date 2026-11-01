@@ -2,7 +2,7 @@
 mod tests {
     use opaque_ke::{
         CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
-        ServerLogin, ServerLoginStartParameters, ServerRegistration, ServerSetup,
+        ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
     };
     use rand::rngs::OsRng;
 
@@ -91,7 +91,7 @@ mod tests {
             Some(password_file),
             CredentialRequest::deserialize(&credential_request_bytes).unwrap(),
             USERNAME.as_bytes(),
-            ServerLoginStartParameters::default(),
+            ServerLoginParameters::default(),
         )
         .unwrap();
 
@@ -122,7 +122,7 @@ mod tests {
             Some(password_file),
             CredentialRequest::deserialize(&start_result.credential_request).unwrap(),
             USERNAME.as_bytes(),
-            ServerLoginStartParameters::default(),
+            ServerLoginParameters::default(),
         )
         .unwrap();
 
@@ -179,6 +179,7 @@ mod tests {
             .finish(
                 CredentialFinalization::deserialize(&finish_result.credential_finalization)
                     .unwrap(),
+                ServerLoginParameters::default(),
             )
             .unwrap();
 

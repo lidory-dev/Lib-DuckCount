@@ -15,8 +15,7 @@ pub(crate) struct DefaultCipherSuite;
 
 impl CipherSuite for DefaultCipherSuite {
     type OprfCs = opaque_ke::Ristretto255;
-    type KeGroup = opaque_ke::Ristretto255;
-    type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
+    type KeyExchange = opaque_ke::TripleDh<opaque_ke::Ristretto255, sha2::Sha512>;
     // type KeyExchange = opaque_ke::TripleDhKem<
     //     opaque_ke::Ristretto255,
     //     sha3::Sha3_512, // TODO: Check if the use of SHA3 does not pose a security risk.

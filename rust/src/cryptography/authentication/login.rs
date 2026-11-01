@@ -121,8 +121,11 @@ impl Login {
 
         state.zeroize();
 
+        let mut rng = OsRng;
+
         let client_login_finish = client_login
             .finish(
+                &mut rng,
                 password.as_bytes(),
                 CredentialResponse::deserialize(credential_response_bytes)
                     .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,

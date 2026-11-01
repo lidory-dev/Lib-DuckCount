@@ -247,8 +247,11 @@ impl PasswordChange {
         login_state.zeroize();
         registration_state.zeroize();
 
+        let mut rng = OsRng;
+
         let mut client_login_finish = client_login
             .finish(
+                &mut rng,
                 current_password.as_bytes(),
                 CredentialResponse::deserialize(&credential_response_bytes)
                     .map_err(|_| AuthenticationError::CredentialResponseDeserializationFailed)?,
@@ -262,8 +265,6 @@ impl PasswordChange {
         // only the seal this change replaces, and nothing runs on the session key.
         client_login_finish.export_key.zeroize();
         client_login_finish.session_key.zeroize();
-
-        let mut rng = OsRng;
 
         let mut client_registration_finish = client_registration
             .finish(
