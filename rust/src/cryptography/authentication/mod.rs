@@ -1,7 +1,12 @@
 use std::fmt::Display;
 
-use argon2::Argon2;
-use opaque_ke::CipherSuite;
+use argon2::{Algorithm, Argon2, Params, Version};
+use opaque_ke::{
+    CipherSuite,
+    errors::InternalError,
+    generic_array::{ArrayLength, GenericArray},
+    ksf::Ksf,
+};
 use zeroize::Zeroizing;
 
 use crate::cryptography::encryption::keys::NON_DETERMINISTIC_ENCRYPTION_KEY_SIZE;
@@ -22,7 +27,51 @@ impl CipherSuite for DefaultCipherSuite {
     //     opaque_ke::ml_kem::MlKem768,
     // >;
 
-    type Ksf = Argon2<'static>;
+    type Ksf = PasswordStretching;
+}
+
+/// What each guess at a password costs: 64 MiB and 3 passes of Argon2id, on one
+/// lane.
+///
+/// Whoever holds both the password files and the server's OPRF seed can guess
+/// offline, and a right guess opens the vault root key, so this cost is all that
+/// slows them down. It is RFC 9106's memory-constrained option, except for the
+/// lanes: `argon2` runs them one after the other, so more would cost the phone
+/// the same time while an attacker's hardware runs them side by side.
+///
+/// A password file only opens under the cost it was written with, so changing
+/// these locks out every account.
+const PASSWORD_STRETCHING_PARAMS: Params = match Params::new(64 * 1024, 3, 1, None) {
+    Ok(params) => params,
+    Err(_) => panic!("Argon2 parameters out of range"),
+};
+
+/// OPAQUE's key stretching, at [PASSWORD_STRETCHING_PARAMS].
+///
+/// Only the client ever runs it, so the cost is set here alone: the API's suite
+/// names a plain `Argon2` that only its test client runs. The cost belongs to
+/// the suite's type rather than to a parameter passed at each call, so no flow
+/// can end up on another one, and a plain `Argon2` here would run at the crate's
+/// defaults, OWASP's minimum.
+pub(crate) struct PasswordStretching(Argon2<'static>);
+
+impl Default for PasswordStretching {
+    fn default() -> Self {
+        Self(Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            PASSWORD_STRETCHING_PARAMS,
+        ))
+    }
+}
+
+impl Ksf for PasswordStretching {
+    fn hash<L: ArrayLength<u8>>(
+        &self,
+        input: GenericArray<u8, L>,
+    ) -> Result<GenericArray<u8, L>, InternalError> {
+        self.0.hash(input)
+    }
 }
 
 /// The AEAD key that seals the vault root key: the first

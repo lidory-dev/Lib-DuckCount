@@ -54,3 +54,12 @@ uuid = { version = "1.20.0", features = ["v4"] } # Apache-2.0 OR MIT
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]
 path = "rust/src/lib.rs"
+
+# Unoptimized, Argon2 turns every login in a debug build into seconds of waiting
+# (2.4 s per run on a Pixel 7 Pro, against 0.14 s with this). Everything else in
+# a debug build stays as it is.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

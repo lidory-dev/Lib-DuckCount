@@ -1,8 +1,11 @@
 #[cfg(test)]
 mod tests {
+    use argon2::{Algorithm, Argon2, Params, RECOMMENDED_SALT_LEN, Version};
     use opaque_ke::{
-        CredentialFinalization, CredentialRequest, RegistrationRequest, RegistrationUpload,
-        ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
+        CipherSuite, CredentialFinalization, CredentialRequest, RegistrationRequest,
+        RegistrationUpload, ServerLogin, ServerLoginParameters, ServerRegistration, ServerSetup,
+        generic_array::{GenericArray, typenum::U64},
+        ksf::Ksf,
     };
     use rand::rngs::OsRng;
 
@@ -197,6 +200,29 @@ mod tests {
     /// the export key, a later login with the same password unseals byte for
     /// byte.
     ///
+    /// The cost is spelled out in numbers here and asked of the suite, not of
+    /// the stretching type, so lowering it or the suite going back to a plain
+    /// `Argon2` fails here. The round trips below would pass at any cost.
+    #[test]
+    fn test_the_suite_stretches_passwords_with_argon2id_at_64_mib_and_3_passes() {
+        let input = GenericArray::<u8, U64>::default();
+
+        let stretched = <DefaultCipherSuite as CipherSuite>::Ksf::default()
+            .hash(input.clone())
+            .unwrap();
+
+        let mut expected = [0u8; 64];
+        Argon2::new(
+            Algorithm::Argon2id,
+            Version::V0x13,
+            Params::new(64 * 1024, 3, 1, None).unwrap(),
+        )
+        .hash_password_into(&input, &[0; RECOMMENDED_SALT_LEN], &mut expected)
+        .unwrap();
+
+        assert_eq!(stretched.as_slice(), expected);
+    }
+
     /// This is what catches the export key being the wrong width for the AEAD
     /// helpers: [DefaultCipherSuite] hashes with SHA-512, so the export key is
     /// 64 bytes while AES-256-GCM takes 32, and without
