@@ -4299,6 +4299,7 @@ mod tests {
                 user_uuid: author.uuid.clone(),
                 share: "42.00".to_string(),
                 is_share_fixed: false,
+                share_percentage: None,
             }],
             is_settlement: false,
         }

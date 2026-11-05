@@ -56,6 +56,7 @@ pub struct OneTimeExpenseBeneficiary {
     pub user_uuid: String,
     pub share: SealedValue,
     pub is_share_fixed: SealedValue,
+    pub share_percentage: SealedValue,
 }
 
 /// One version of a one-time expense, as the creditor signs it: everything the

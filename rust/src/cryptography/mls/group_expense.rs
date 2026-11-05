@@ -131,6 +131,9 @@ pub struct GroupExpenseBeneficiary {
     /// Whether the share was set by hand, rather than split from what the
     /// others' fixed shares leave.
     pub is_share_fixed: bool,
+    /// The percentage of the expense's amount the share was set as, `None`
+    /// for one set as an amount or split.
+    pub share_percentage: Option<String>,
 }
 
 /// One version of a group expense, as its author signs it: what it opens to,

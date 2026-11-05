@@ -52,6 +52,7 @@ mod tests {
             user_uuid: user_uuid.to_string(),
             share: sealed(&format!("{user_uuid} share")),
             is_share_fixed: sealed(&format!("{user_uuid} is_share_fixed")),
+            share_percentage: sealed(&format!("{user_uuid} share_percentage")),
         }
     }
 
@@ -111,6 +112,9 @@ mod tests {
             ("a share", |m| m.beneficiaries[0].share = sealed("other")),
             ("a fixed-share flag", |m| {
                 m.beneficiaries[0].is_share_fixed = sealed("other")
+            }),
+            ("a share's percentage", |m| {
+                m.beneficiaries[0].share_percentage = sealed("other")
             }),
             ("two shares swapped", |m| {
                 let first = m.beneficiaries[0].share.clone();

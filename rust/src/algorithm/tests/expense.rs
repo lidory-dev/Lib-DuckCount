@@ -152,7 +152,7 @@ mod tests {
         let amount = "100.00";
         let currency = Currency::new("Euro", "€", true).unwrap();
         let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new()).unwrap();
+            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         // One share should be 33.34 and the others 33.33
@@ -194,7 +194,7 @@ mod tests {
         let amount = "99999.00";
         let currency = Currency::new("Euro", "€", true).unwrap();
         let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new()).unwrap();
+            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         let mut count_33333 = 0;
@@ -231,7 +231,7 @@ mod tests {
         let amount = "1000";
         let currency = Currency::new("Yen", "¥", false).unwrap();
         let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new()).unwrap();
+            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         // One share should be 334 and the others 333.
@@ -278,7 +278,7 @@ mod tests {
         let beneficiary_uuids: Vec<String> =
             (0..count).map(|_| Uuid::new_v4().to_string()).collect();
 
-        compute_beneficiaries("100", &euro(), &beneficiary_uuids, &HashMap::new()).unwrap()
+        compute_beneficiaries("100", &euro(), &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap()
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
             ("1000", yen()),
         ] {
             let beneficiaries =
-                compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new())
+                compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new())
                     .unwrap();
 
             assert_eq!(
@@ -479,6 +479,441 @@ mod tests {
         assert_eq!(
             validate_expense("99", &euro(), &beneficiaries),
             Err(ExpenseError::SharesExceedTotalAmount)
+        );
+    }
+
+    /// Fresh UUIDs for `count` beneficiaries.
+    fn uuids(count: usize) -> Vec<String> {
+        (0..count).map(|_| Uuid::new_v4().to_string()).collect()
+    }
+
+    /// Each of `uuids` with the percentage at the same place in `percentages`, a blank one having none.
+    fn percentages_of(uuids: &[String], percentages: &[&str]) -> HashMap<String, String> {
+        uuids
+            .iter()
+            .zip(percentages)
+            .filter(|(_, percentage)| !percentage.is_empty())
+            .map(|(uuid, percentage)| (uuid.clone(), percentage.to_string()))
+            .collect()
+    }
+
+    /// The shares `percentages` of `amount` come to, in order, written as numbers so that a test
+    /// does not depend on how many zeros they end in.
+    fn shares_for_percentages(
+        amount: &str,
+        currency: &Currency,
+        percentages: &[&str],
+    ) -> Vec<BigDecimal> {
+        let uuids = uuids(percentages.len());
+
+        compute_beneficiaries(
+            amount,
+            currency,
+            &uuids,
+            &HashMap::new(),
+            &percentages_of(&uuids, percentages),
+        )
+        .unwrap()
+        .iter()
+        .map(|beneficiary| BigDecimal::from_str(&beneficiary.share).unwrap())
+        .collect()
+    }
+
+    fn numbers(values: &[&str]) -> Vec<BigDecimal> {
+        values
+            .iter()
+            .map(|value| BigDecimal::from_str(value).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_works_percentages_out() {
+        assert_eq!(
+            shares_for_percentages("80.00", &euro(), &["25", "75"]),
+            numbers(&["20", "60"])
+        );
+        assert_eq!(
+            shares_for_percentages("10.00", &euro(), &["12.5", "87.5"]),
+            numbers(&["1.25", "8.75"])
+        );
+        assert_eq!(
+            shares_for_percentages("1000", &yen(), &["10", "90"]),
+            numbers(&["100", "900"])
+        );
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_keeps_the_percentage_on_who_set_one_alone() {
+        let uuids = uuids(3);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[1].clone(), "10.00".to_string());
+
+        let beneficiaries = compute_beneficiaries(
+            "100.00",
+            &euro(),
+            &uuids,
+            &fixed_shares,
+            &percentages_of(&uuids, &["25"]),
+        )
+        .unwrap();
+
+        // In the order they were given in, each with what it was set as.
+        let found: Vec<(&str, Option<&str>)> = beneficiaries
+            .iter()
+            .map(|beneficiary| {
+                (
+                    beneficiary.user_uuid.as_str(),
+                    beneficiary.share_percentage.as_deref(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            found,
+            vec![
+                (uuids[0].as_str(), Some("25")),
+                (uuids[1].as_str(), None),
+                (uuids[2].as_str(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_a_percentage_is_of_the_whole_amount_and_the_rest_is_split() {
+        let uuids = uuids(4);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[1].clone(), "10.00".to_string());
+
+        let beneficiaries = compute_beneficiaries(
+            "100.00",
+            &euro(),
+            &uuids,
+            &fixed_shares,
+            &percentages_of(&uuids, &["25"]),
+        )
+        .unwrap();
+
+        let shares: Vec<BigDecimal> = beneficiaries
+            .iter()
+            .map(|beneficiary| BigDecimal::from_str(&beneficiary.share).unwrap())
+            .collect();
+
+        // 25% of 100, whatever the 10 fixed takes; the 65 left, split between the other two.
+        assert_eq!(shares, numbers(&["25", "10", "32.5", "32.5"]));
+        assert_eq!(validate_expense("100.00", &euro(), &beneficiaries), Ok(()));
+    }
+
+    #[test]
+    fn test_subunits_left_by_rounding_go_to_who_lost_the_most() {
+        // 3.333, 3.333 and 3.334: all round down to 9.99 and the last lost the most.
+        assert_eq!(
+            shares_for_percentages("10.00", &euro(), &["33.33", "33.33", "33.34"]),
+            numbers(&["3.33", "3.33", "3.34"])
+        );
+        // Wherever it is listed.
+        assert_eq!(
+            shares_for_percentages("10.00", &euro(), &["33.34", "33.33", "33.33"]),
+            numbers(&["3.34", "3.33", "3.33"])
+        );
+        assert_eq!(
+            shares_for_percentages("100", &yen(), &["33.33", "33.33", "33.34"]),
+            numbers(&["33", "33", "34"])
+        );
+    }
+
+    #[test]
+    fn test_subunits_left_by_rounding_go_to_the_first_when_they_lost_as_much() {
+        assert_eq!(
+            shares_for_percentages("0.03", &euro(), &["50", "50"]),
+            numbers(&["0.02", "0.01"])
+        );
+    }
+
+    #[test]
+    fn test_a_percentage_rounds_to_the_nearest_subunit_when_others_pay_the_rest() {
+        let uuids = uuids(2);
+
+        let shares_of = |percentage: &str| {
+            compute_beneficiaries(
+                "0.10",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &percentages_of(&uuids, &[percentage]),
+            )
+            .unwrap()
+            .iter()
+            .map(|beneficiary| BigDecimal::from_str(&beneficiary.share).unwrap())
+            .collect::<Vec<BigDecimal>>()
+        };
+
+        assert_eq!(shares_of("14"), numbers(&["0.01", "0.09"]));
+        assert_eq!(shares_of("15"), numbers(&["0.02", "0.08"]));
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_percentages_that_do_not_make_up_the_amount() {
+        let compute = |amount: &str, percentages: &[&str]| {
+            let uuids = uuids(percentages.len());
+
+            compute_beneficiaries(
+                amount,
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &percentages_of(&uuids, percentages),
+            )
+            .map(|_| ())
+        };
+
+        assert_eq!(
+            compute("100.00", &["60", "50"]),
+            Err(ExpenseError::SharesExceedTotalAmount)
+        );
+        assert_eq!(
+            compute("100.00", &["150"]),
+            Err(ExpenseError::SharesExceedTotalAmount)
+        );
+        assert_eq!(
+            compute("100.00", &["60", "30"]),
+            Err(ExpenseError::SharesBelowTotalAmount)
+        );
+        // Not even when rounding would have made them add up, on an amount this small: whether
+        // they do depends on what they say and not on what they are of.
+        assert_eq!(
+            compute("1.00", &["33.33", "33.33", "33.33"]),
+            Err(ExpenseError::SharesBelowTotalAmount)
+        );
+    }
+
+    #[test]
+    fn test_a_fixed_share_and_percentages_have_to_make_up_the_amount_together() {
+        let uuids = uuids(2);
+        let compute = |percentage: &str| {
+            let mut fixed_shares = HashMap::new();
+            fixed_shares.insert(uuids[0].clone(), "40.00".to_string());
+
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &fixed_shares,
+                &percentages_of(&uuids, &["", percentage]),
+            )
+            .map(|beneficiaries| beneficiaries[1].share.clone())
+        };
+
+        assert_eq!(
+            compute("60").map(|share| BigDecimal::from_str(&share).unwrap()),
+            Ok(BigDecimal::from(60))
+        );
+        assert_eq!(compute("59"), Err(ExpenseError::SharesBelowTotalAmount));
+        assert_eq!(compute("61"), Err(ExpenseError::SharesExceedTotalAmount));
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_percentage_it_cannot_take() {
+        let uuids = uuids(2);
+        let compute = |percentage: &str| {
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &percentages_of(&uuids, &[percentage]),
+            )
+            .map(|_| ())
+        };
+
+        for malformed in [
+            "abc", "-5", "+5", "5.", ".5", "5.123", "1e1", "5_0", "1000", "٥", "5%", " 5",
+        ] {
+            assert_eq!(
+                compute(malformed),
+                Err(ExpenseError::MalformedPercentage),
+                "{malformed}"
+            );
+        }
+
+        for zero in ["0", "0.0", "0.00", "000"] {
+            assert_eq!(
+                compute(zero),
+                Err(ExpenseError::NonPositiveShare),
+                "{zero}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_percentage_of_nobody_on_the_expense() {
+        let uuids = uuids(1);
+
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &percentages_of(&[Uuid::new_v4().to_string()], &["100"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::FixedShareForUnknownBeneficiary)
+        );
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_share_both_fixed_and_a_percentage() {
+        let uuids = uuids(2);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "50.00".to_string());
+
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &fixed_shares,
+                &percentages_of(&uuids, &["50"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::FixedShareAndPercentage)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_accepts_every_share_a_percentage_is_worked_out_to() {
+        let percentages = [
+            vec!["100"],
+            vec!["50", "50"],
+            vec!["33.33", "33.33", "33.34"],
+            vec!["1", "99"],
+            vec!["12.34", "23.45", "34.56", "29.65"],
+            vec!["7", "13", "80"],
+        ];
+
+        for percentages in &percentages {
+            for amount in ["100.00", "10.00", "99.99", "1234.56", "7.77", "1000000.01"] {
+                let uuids = uuids(percentages.len());
+
+                let beneficiaries = compute_beneficiaries(
+                    amount,
+                    &euro(),
+                    &uuids,
+                    &HashMap::new(),
+                    &percentages_of(&uuids, percentages),
+                )
+                .unwrap();
+
+                assert_eq!(
+                    validate_expense(amount, &euro(), &beneficiaries),
+                    Ok(()),
+                    "{percentages:?} of {amount}: {beneficiaries:?}"
+                );
+
+                // Whichever order a receiver is served them in.
+                let reversed: Vec<Beneficiary> = beneficiaries.iter().rev().cloned().collect();
+                assert_eq!(validate_expense(amount, &euro(), &reversed), Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_expense_takes_a_percentage_rounded_either_way() {
+        for shares in [["3.34", "6.66"], ["3.33", "6.67"]] {
+            let beneficiaries = vec![
+                Beneficiary::with_percentage(&Uuid::new_v4().to_string(), shares[0], "33.33"),
+                Beneficiary::with_percentage(&Uuid::new_v4().to_string(), shares[1], "66.67"),
+            ];
+
+            assert_eq!(validate_expense("10.00", &euro(), &beneficiaries), Ok(()));
+        }
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_share_its_percentage_does_not_come_to() {
+        let refused = |amount: &str, first: (&str, &str), second: (&str, &str)| {
+            validate_expense(
+                amount,
+                &euro(),
+                &vec![
+                    Beneficiary::with_percentage(&Uuid::new_v4().to_string(), first.0, first.1),
+                    Beneficiary::with_percentage(&Uuid::new_v4().to_string(), second.0, second.1),
+                ],
+            )
+        };
+
+        // Adds up, and says something else.
+        assert_eq!(
+            refused("100.00", ("40.00", "25"), ("60.00", "75")),
+            Err(ExpenseError::ShareDiffersFromPercentage)
+        );
+        // By a subunit, on a percentage that falls exactly on one.
+        assert_eq!(
+            refused("100.00", ("25.01", "25"), ("74.99", "75")),
+            Err(ExpenseError::ShareDiffersFromPercentage)
+        );
+        // Two subunits from what it comes to, 3.333.
+        assert_eq!(
+            refused("10.00", ("3.35", "33.33"), ("6.65", "66.67")),
+            Err(ExpenseError::ShareDiffersFromPercentage)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_percentage_it_cannot_read() {
+        let one_with = |percentage: &str| {
+            vec![Beneficiary::with_percentage(
+                &Uuid::new_v4().to_string(),
+                "100.00",
+                percentage,
+            )]
+        };
+
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("all of it")),
+            Err(ExpenseError::MalformedPercentage)
+        );
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("")),
+            Err(ExpenseError::MalformedPercentage)
+        );
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("0")),
+            Err(ExpenseError::NonPositiveShare)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_percentage_too_small_to_come_to_anything() {
+        let uuids = uuids(2);
+
+        // 1% of 0.10 rounds to nothing, which no beneficiary can owe.
+        let beneficiaries = compute_beneficiaries(
+            "0.10",
+            &euro(),
+            &uuids,
+            &HashMap::new(),
+            &percentages_of(&uuids, &["1"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            validate_expense("0.10", &euro(), &beneficiaries),
+            Err(ExpenseError::NonPositiveShare)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_holds_a_currency_without_subunits_to_whole_shares() {
+        let beneficiaries = vec![Beneficiary::with_percentage(
+            &Uuid::new_v4().to_string(),
+            "100.5",
+            "100",
+        )];
+
+        assert_eq!(
+            validate_expense("100", &yen(), &beneficiaries),
+            Err(ExpenseError::UnsupportedSubunits)
         );
     }
 }

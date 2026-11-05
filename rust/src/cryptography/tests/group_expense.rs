@@ -88,6 +88,7 @@ mod tests {
             user_uuid: user_uuid.to_string(),
             share: share.to_string(),
             is_share_fixed,
+            share_percentage: None,
         }
     }
 
@@ -174,6 +175,7 @@ mod tests {
                     "user_uuid": beneficiary.user_uuid,
                     "share": beneficiary.share,
                     "is_share_fixed": beneficiary.is_share_fixed,
+                    "share_percentage": beneficiary.share_percentage,
                 })
             })
             .collect();
@@ -236,6 +238,9 @@ mod tests {
                     user_uuid: text(beneficiary, "user_uuid"),
                     share: text(beneficiary, "share"),
                     is_share_fixed: beneficiary["is_share_fixed"].as_bool().unwrap(),
+                    share_percentage: beneficiary["share_percentage"]
+                        .as_str()
+                        .map(str::to_string),
                 })
                 .collect(),
             is_settlement: content["is_settlement"].as_bool().unwrap(),
@@ -413,6 +418,9 @@ mod tests {
             ("their share emptied", |b| b.share = String::new()),
             ("their fixed-share flag flipped", |b| {
                 b.is_share_fixed = !b.is_share_fixed
+            }),
+            ("their percentage added", |b| {
+                b.share_percentage = Some("50".to_string())
             }),
         ];
 
