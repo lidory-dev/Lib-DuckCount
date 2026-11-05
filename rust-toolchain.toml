@@ -1,0 +1,15 @@
+# The compiler is part of what makes the app's library the bytes it is: F-Droid only
+# publishes a release it can build to the same bytes, so every build uses this one.
+# Move it on purpose, and rebuild both ways when you do (see fdroid/README.md in the app).
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = [
+    "aarch64-linux-android",
+    "armv7-linux-androideabi",
+    "i686-linux-android",
+    "x86_64-linux-android",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+]

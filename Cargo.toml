@@ -55,6 +55,10 @@ uuid = { version = "1.20.0", features = ["v4"] } # Apache-2.0 OR MIT
 crate-type = ["cdylib", "staticlib", "lib"]
 path = "rust/src/lib.rs"
 
+# One unit, so that the machine building it has no say in how the code is split.
+[profile.release]
+codegen-units = 1
+
 # Unoptimized, Argon2 turns every login in a debug build into seconds of waiting
 # (2.4 s per run on a Pixel 7 Pro, against 0.14 s with this). Everything else in
 # a debug build stays as it is.
