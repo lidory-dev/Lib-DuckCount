@@ -121,6 +121,21 @@ const MAX_WHOLE_DIGITS: usize = 15;
 /// with a subunit: its cents.
 const MAX_SUBUNIT_DIGITS: usize = 2;
 
+/// How long a client makes every amount and share it seals, padding the rest: as long as the longest
+/// amount there is, `999999999999999.99`. AES-GCM does not hide how long what it seals is, so the
+/// server would otherwise read from the length of a sealed amount how large it is. In a currency
+/// without a subunit too, for the same length not to tell it whether the currency has one.
+pub const SEALED_AMOUNT_LENGTH: usize = MAX_WHOLE_DIGITS + 1 + MAX_SUBUNIT_DIGITS;
+
+/// Exposes [`SEALED_AMOUNT_LENGTH`] to the foreign bindings so clients seal amounts at that length
+/// instead of hardcoding it.
+///
+/// The value is narrowed to `u16`, as [`max_beneficiaries`] is.
+#[uniffi::export]
+pub fn sealed_amount_length() -> u16 {
+    SEALED_AMOUNT_LENGTH as u16
+}
+
 /// The most digits a percentage or a weight may have before its decimal point: as many as 100,
 /// the most that shares can add up to, which is more parts than anybody counts in too.
 const MAX_SHARE_SETTING_WHOLE_DIGITS: usize = 3;
@@ -926,8 +941,7 @@ fn parse_share_setting(setting: &str, malformed: ExpenseError) -> Result<BigInt,
 }
 
 /// Parses `amount`, written as [canonical_amount] writes one and no other way, which is all that
-/// anybody should seal: two versions of an expense saying the same thing are then the same, and the
-/// length of what is sealed says no more than how large the amount is.
+/// anybody should seal: two versions of an expense saying the same thing are then the same.
 ///
 /// # Errors
 ///

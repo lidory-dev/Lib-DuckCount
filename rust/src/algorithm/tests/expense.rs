@@ -7,7 +7,7 @@ mod tests {
         currency::Currency,
         expense::{
             Expense, ExpenseError, canonical_amount, compute_beneficiaries, max_beneficiaries,
-            max_group_expense_edits, validate_expense,
+            max_group_expense_edits, sealed_amount_length, validate_expense,
         },
     };
     use bigdecimal::{BigDecimal, Zero};
@@ -413,6 +413,32 @@ mod tests {
         assert_eq!(
             validate_expense("100.00", &euro(), &vec![]),
             Err(ExpenseError::NoBeneficiaries)
+        );
+    }
+
+    #[test]
+    fn test_a_sealed_amount_is_as_long_as_the_longest_amount_there_is() {
+        let longest = "999999999999999.99";
+
+        assert_eq!(sealed_amount_length() as usize, longest.len());
+        assert_eq!(
+            validate_expense(longest, &euro(), &one_beneficiary(longest)),
+            Ok(())
+        );
+
+        // A digit more is no amount, in a currency with subunits or without.
+        let past = format!("9{longest}");
+        assert_eq!(
+            validate_expense(&past, &euro(), &one_beneficiary(&past)),
+            Err(ExpenseError::MalformedAmount)
+        );
+        assert_eq!(
+            validate_expense(
+                "9999999999999999",
+                &yen(),
+                &one_beneficiary("9999999999999999")
+            ),
+            Err(ExpenseError::MalformedAmount)
         );
     }
 

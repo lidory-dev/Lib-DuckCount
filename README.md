@@ -7,7 +7,7 @@ A Rust library for **shared expense management** and **secure cryptographic util
 ### **Expense Management**
 - **Track Expenses**: Easily add and manage expenses among users.
 - **Flexible Shares**: Split an expense evenly, name a beneficiary's share as an amount, set it as a percentage of the amount, or weigh it against the others (2, 1 and 1 of 100 is 50, 25 and 25), in any mix. Shares are rounded so that they always add up to the amount exactly.
-- **One Amount Format**: Every amount the library hands out is `12` in a currency without a subunit and `12.00` in one with, and `validate_expense` takes no other: `canonical_amount` writes an amount that way before it is sealed.
+- **One Amount Format**: Every amount the library hands out is `12` in a currency without a subunit and `12.00` in one with, and `validate_expense` takes no other: `canonical_amount` writes an amount that way before it is sealed, padded then to `sealed_amount_length()` so that the server cannot read its size from its length.
 - **Calculate Debts**: Automatically calculate net debts for each user.
 - **Equilibrate Transactions**: Determine the optimal set of transactions to settle debts.
 - **Deterministic Calculations**: Ensure consistent and predictable results using UUIDs for tie-breaking.
