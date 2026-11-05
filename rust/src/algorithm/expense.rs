@@ -61,10 +61,8 @@ pub enum ExpenseError {
     /// A type could not be converted.
     #[error("A type could not be converted.")]
     InternalTypeConversionFailed,
-    /// The amount of the expense or the share of a beneficiary uses subunits, but the currency does not support fractional amounts (e.g., ¥12.50 for a currency that only allows whole units).
-    #[error(
-        "The amount or the share of a beneficiary uses subunits, but the currency does not support fractional amounts."
-    )]
+    /// The amount of the expense or the share of a beneficiary uses subunits the currency does not have (e.g., ¥12.50 for a currency that only allows whole units, or €12.345).
+    #[error("The amount or the share of a beneficiary uses subunits the currency does not have.")]
     UnsupportedSubunits,
     /// The same user is listed as a beneficiary more than once.
     #[error("The same user is listed as a beneficiary more than once.")]
@@ -184,7 +182,7 @@ impl Expense {
     /// - The sum of the shares exceeds the total expense amount.
     /// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
     /// - Any share amount is not positive.
-    /// - The expense amount or any share uses subunits, but the currency does not support fractional amounts.
+    /// - The expense amount or any share uses subunits the currency does not have.
     ///
     /// # Examples
     ///
@@ -233,7 +231,7 @@ impl Expense {
             return Err(ExpenseError::NonPositiveAmount);
         }
 
-        if !currency.has_sub_unit && amount.fractional_digit_count() > 0 {
+        if amount.fractional_digit_count() > currency.subunit_digits() {
             return Err(ExpenseError::UnsupportedSubunits);
         }
 
@@ -242,6 +240,7 @@ impl Expense {
         }
 
         let mut total_share_amount = BigDecimal::zero();
+        let mut written_beneficiaries = Vec::with_capacity(beneficiaries.len());
 
         for beneficiary in beneficiaries {
             let share_amount = BigDecimal::from_str(&beneficiary.share)
@@ -251,9 +250,14 @@ impl Expense {
                 return Err(ExpenseError::NonPositiveShare);
             }
 
-            if !currency.has_sub_unit && share_amount.fractional_digit_count() > 0 {
+            if share_amount.fractional_digit_count() > currency.subunit_digits() {
                 return Err(ExpenseError::UnsupportedSubunits);
             }
+
+            written_beneficiaries.push(Beneficiary {
+                share: currency.write_amount(&share_amount),
+                ..beneficiary.clone()
+            });
 
             total_share_amount += share_amount;
         }
@@ -268,9 +272,9 @@ impl Expense {
 
         Ok(Expense {
             creditor_uuid: creditor_uuid.to_string(),
-            amount: amount.to_plain_string(),
+            amount: currency.write_amount(&amount),
             currency: currency.to_owned(),
-            beneficiaries: beneficiaries.to_owned(),
+            beneficiaries: written_beneficiaries,
         })
     }
 
@@ -282,6 +286,39 @@ impl Expense {
             beneficiaries: self.beneficiaries.clone(),
         }
     }
+}
+
+/// Writes `amount` the one way the library hands an amount out, and the only way
+/// [validate_expense] takes one, as every amount has to be before it is sealed: `12` in a currency
+/// without a subunit, and `12.00` in a currency with one.
+///
+/// # Arguments
+///
+/// * `amount` - The amount, as anything from `12` to `12.50` in a currency with a subunit, and in
+///   whole units otherwise.
+/// * `currency` - The currency it is in.
+///
+/// # Errors
+///
+/// * `ExpenseError::UnsupportedSubunits` - If `amount` is digits then a point, and `currency` has no
+///   subunit.
+/// * `ExpenseError::MalformedAmount` - If `amount` is written any other way.
+///
+/// # Examples
+///
+/// ```rust
+/// # use lib_duckcount::algorithm::{currency::Currency, expense::canonical_amount};
+///
+/// let euro = Currency::new("Euro", "€", true).unwrap();
+/// let yen = Currency::new("Yen", "¥", false).unwrap();
+///
+/// assert_eq!(canonical_amount("12", &euro).unwrap(), "12.00");
+/// assert_eq!(canonical_amount("12.5", &euro).unwrap(), "12.50");
+/// assert_eq!(canonical_amount("12", &yen).unwrap(), "12");
+/// ```
+#[uniffi::export]
+pub fn canonical_amount(amount: &str, currency: &Currency) -> Result<String, ExpenseError> {
+    Ok(currency.write_amount(&parse_amount(amount, currency)?))
 }
 
 /// Computes the share of every beneficiary, splitting the not-yet-assigned part of the amount
@@ -300,9 +337,10 @@ impl Expense {
 /// whoever comes first. If every beneficiary already has an explicit share or a percentage, those
 /// shares must come to the amount.
 ///
-/// The beneficiaries come back in the order of `beneficiary_user_uuids`. When `share_weights` lists
-/// anybody, those splitting the remaining amount all come back with a weight, one for those it does
-/// not list, a weight meaning nothing but next to the others.
+/// The beneficiaries come back in the order of `beneficiary_user_uuids`, every share written as
+/// [canonical_amount] writes an amount, a fixed one too. When `share_weights` lists anybody, those
+/// splitting the remaining amount all come back with a weight, one for those it does not list, a
+/// weight meaning nothing but next to the others.
 ///
 /// # Arguments
 ///
@@ -323,6 +361,7 @@ impl Expense {
 /// - A beneficiary's share was set more than one way, as a fixed share, a percentage or a weight.
 /// - The amount, any explicitly set share, any percentage or any weight is malformed and cannot be
 ///   parsed.
+/// - The amount or any explicitly set share uses subunits the currency does not have.
 /// - Any fixed share, percentage or weight is not positive.
 /// - The sum of the shares, with each percentage taken before it is rounded, exceeds the total
 ///   expense amount.
@@ -430,20 +469,22 @@ pub fn compute_beneficiaries(
     share_percentages: &HashMap<String, String>,
     share_weights: &HashMap<String, String>,
 ) -> Result<Vec<Beneficiary>, ExpenseError> {
-    let amount = BigDecimal::from_str(amount).map_err(|_| ExpenseError::MalformedAmount)?;
+    let amount = parse_amount(amount, currency)?;
 
     let mut total_fixed_amount = BigDecimal::from(0);
+    let mut written_fixed_shares = HashMap::with_capacity(fixed_shares.len());
     for (uuid, share) in fixed_shares {
         if !beneficiary_user_uuids.contains(uuid) {
             return Err(ExpenseError::FixedShareForUnknownBeneficiary);
         }
 
-        let share_amount =
-            BigDecimal::from_str(share).map_err(|_| ExpenseError::MalformedAmount)?;
+        let share_amount = parse_amount(share, currency)?;
 
         if share_amount <= BigDecimal::from(0) {
             return Err(ExpenseError::NonPositiveShare);
         }
+
+        written_fixed_shares.insert(uuid, currency.write_amount(&share_amount));
 
         total_fixed_amount += share_amount;
     }
@@ -528,16 +569,16 @@ pub fn compute_beneficiaries(
     let mut beneficiaries = Vec::with_capacity(beneficiary_user_uuids.len());
 
     for beneficiary_user_uuid in beneficiary_user_uuids {
-        if let Some(share) = fixed_shares.get(beneficiary_user_uuid) {
+        if let Some(share) = written_fixed_shares.get(beneficiary_user_uuid) {
             beneficiaries.push(Beneficiary::new(beneficiary_user_uuid, share));
         } else if let Some(share) = percentage_shares.get(beneficiary_user_uuid) {
             beneficiaries.push(Beneficiary::with_percentage(
                 beneficiary_user_uuid,
-                &share.to_plain_string(),
+                &currency.write_amount(share),
                 &share_percentages[beneficiary_user_uuid],
             ));
         } else if let Some(share) = divided_amount_iter.next() {
-            let share = share.to_plain_string();
+            let share = currency.write_amount(&share);
 
             beneficiaries.push(if share_weights.is_empty() {
                 Beneficiary::new(beneficiary_user_uuid, &share)
@@ -577,8 +618,9 @@ pub fn compute_beneficiaries(
 /// - Each beneficiary has a share, and the sum of the shares is less than the total amount of the expense.
 /// - Any share amount is not positive.
 /// - The expense amount or any share uses subunits, but the currency does not support fractional amounts.
-/// - The expense amount or any share is not 1 to 15 ASCII digits, followed, only in a currency with a
-///   subunit, by an optional point and 1 or 2 digits.
+/// - The expense amount or any share is not written as [canonical_amount] writes one: 1 to 15 ASCII
+///   digits with no zero in front that does nothing, followed, only in a currency with a subunit
+///   and always in one, by a point and 2 digits.
 /// - The same user is listed as a beneficiary more than once.
 /// - Any percentage or weight is malformed or not positive, or a share set as one is neither of the
 ///   two subunits around what it comes to, or that exact amount when it falls on a subunit. What a
@@ -624,7 +666,7 @@ pub fn validate_expense(
     currency: &Currency,
     beneficiaries: &Vec<Beneficiary>,
 ) -> Result<(), ExpenseError> {
-    let amount = parse_amount(amount, currency)?;
+    let amount = parse_canonical_amount(amount, currency)?;
 
     if amount <= BigDecimal::zero() {
         return Err(ExpenseError::NonPositiveAmount);
@@ -647,7 +689,7 @@ pub fn validate_expense(
             return Err(ExpenseError::DuplicateBeneficiary);
         }
 
-        let share = parse_amount(&beneficiary.share, currency)?;
+        let share = parse_canonical_amount(&beneficiary.share, currency)?;
 
         if share <= BigDecimal::zero() {
             return Err(ExpenseError::NonPositiveShare);
@@ -883,9 +925,28 @@ fn parse_share_setting(setting: &str, malformed: ExpenseError) -> Result<BigInt,
     to_subunits(&setting, 100)
 }
 
-/// Parses `amount` in the only form the app writes one: one to [MAX_WHOLE_DIGITS] ASCII
-/// digits, then, in a currency with a subunit, optionally a point and one to
-/// [MAX_SUBUNIT_DIGITS] more digits.
+/// Parses `amount`, written as [canonical_amount] writes one and no other way, which is all that
+/// anybody should seal: two versions of an expense saying the same thing are then the same, and the
+/// length of what is sealed says no more than how large the amount is.
+///
+/// # Errors
+///
+/// * `ExpenseError::UnsupportedSubunits` - If `amount` is digits then a point, and `currency` has no
+///   subunit.
+/// * `ExpenseError::MalformedAmount` - If `amount` is written any other way.
+fn parse_canonical_amount(amount: &str, currency: &Currency) -> Result<BigDecimal, ExpenseError> {
+    let parsed = parse_amount(amount, currency)?;
+
+    if currency.write_amount(&parsed) != amount {
+        return Err(ExpenseError::MalformedAmount);
+    }
+
+    Ok(parsed)
+}
+
+/// Parses `amount` in the forms the library reads one to work with: one to [MAX_WHOLE_DIGITS] ASCII
+/// digits, then, in a currency with a subunit, optionally a point and one to [MAX_SUBUNIT_DIGITS]
+/// more digits.
 ///
 /// [BigDecimal] alone also reads a sign, an exponent and underscores, which other parsers
 /// do not all read the same way, if at all. An exponent also lets two amounts differ in

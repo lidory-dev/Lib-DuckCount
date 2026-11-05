@@ -33,7 +33,7 @@ impl Transaction {
     ///
     /// let debtor_uuid = Uuid::new_v4().to_string();
     /// let creditor_uuid = Uuid::new_v4().to_string();
-    /// let amount = "50.0";
+    /// let amount = "50.00";
     ///
     /// let transaction = Transaction::new(&debtor_uuid, &creditor_uuid, amount);
     /// ```

@@ -192,4 +192,92 @@ mod tests {
 
         assert_eq!(transactions.len(), 2);
     }
+
+    /// A group of Alice, Bob and Charlie where Alice paid `amount`, shared by Bob and Charlie.
+    fn group_of_one_expense(currency: &Currency, amount: &str) -> (Group, [String; 3]) {
+        let alice_uuid = Uuid::new_v4().to_string();
+        let bob_uuid = Uuid::new_v4().to_string();
+        let charlie_uuid = Uuid::new_v4().to_string();
+
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            currency,
+            &vec![bob_uuid.clone(), charlie_uuid.clone()],
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        let expense = Expense::new(&alice_uuid, amount, currency, &beneficiaries).unwrap();
+
+        let group = Group::new(
+            currency,
+            &vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()],
+            &vec![Arc::new(expense)],
+        )
+        .unwrap();
+
+        (group, [alice_uuid, bob_uuid, charlie_uuid])
+    }
+
+    #[test]
+    fn test_net_debts_are_written_with_their_subunits() {
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let (group, [alice, bob, charlie]) = group_of_one_expense(&currency, "100");
+
+        let net_debts = group.calculate_net_debts_per_user().unwrap();
+
+        assert_eq!(net_debts[&alice], "100.00");
+        assert_eq!(net_debts[&bob], "-50.00");
+        assert_eq!(net_debts[&charlie], "-50.00");
+    }
+
+    #[test]
+    fn test_net_debts_are_written_in_whole_units_in_a_currency_without_a_subunit() {
+        let currency = Currency::new("Yen", "¥", false).unwrap();
+        let (group, [alice, bob, charlie]) = group_of_one_expense(&currency, "100");
+
+        let net_debts = group.calculate_net_debts_per_user().unwrap();
+
+        assert_eq!(net_debts[&alice], "100");
+        assert_eq!(net_debts[&bob], "-50");
+        assert_eq!(net_debts[&charlie], "-50");
+    }
+
+    #[test]
+    fn test_a_settled_user_owes_nothing_written_as_any_other_amount() {
+        let euro = Currency::new("Euro", "€", true).unwrap();
+        let yen = Currency::new("Yen", "¥", false).unwrap();
+        let user_uuid = Uuid::new_v4().to_string();
+
+        for (currency, nothing) in [(euro, "0.00"), (yen, "0")] {
+            let group = Group::new(&currency, &vec![user_uuid.clone()], &vec![]).unwrap();
+
+            assert_eq!(
+                group.calculate_net_debts_per_user().unwrap()[&user_uuid],
+                nothing
+            );
+        }
+    }
+
+    #[test]
+    fn test_transactions_are_written_with_their_subunits() {
+        let currency = Currency::new("Euro", "€", true).unwrap();
+        let (group, _) = group_of_one_expense(&currency, "100");
+
+        for transaction in group.calculate_transactions_to_equilibrate().unwrap() {
+            assert_eq!(transaction.amount, "50.00");
+        }
+    }
+
+    #[test]
+    fn test_transactions_are_written_in_whole_units_in_a_currency_without_a_subunit() {
+        let currency = Currency::new("Yen", "¥", false).unwrap();
+        let (group, _) = group_of_one_expense(&currency, "100");
+
+        for transaction in group.calculate_transactions_to_equilibrate().unwrap() {
+            assert_eq!(transaction.amount, "50");
+        }
+    }
 }

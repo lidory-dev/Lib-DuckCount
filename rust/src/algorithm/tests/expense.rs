@@ -6,7 +6,7 @@ mod tests {
         beneficiary::Beneficiary,
         currency::Currency,
         expense::{
-            Expense, ExpenseError, compute_beneficiaries, max_beneficiaries,
+            Expense, ExpenseError, canonical_amount, compute_beneficiaries, max_beneficiaries,
             max_group_expense_edits, validate_expense,
         },
     };
@@ -214,7 +214,7 @@ mod tests {
         let mut count_33333 = 0;
 
         for beneficiary in &beneficiaries {
-            if beneficiary.share == "33333" {
+            if beneficiary.share == "33333.00" {
                 count_33333 += 1;
             }
         }
@@ -321,7 +321,7 @@ mod tests {
         for (amount, currency) in [
             ("100.00", euro()),
             ("0.50", euro()),
-            ("12.5", euro()),
+            ("12.50", euro()),
             ("1000", yen()),
         ] {
             let beneficiaries = compute_beneficiaries(
@@ -383,11 +383,11 @@ mod tests {
     fn test_validate_expense_refuses_a_share_written_any_other_way() {
         let beneficiaries = vec![
             Beneficiary::new(&Uuid::new_v4().to_string(), "1e-3000000000"),
-            Beneficiary::new(&Uuid::new_v4().to_string(), "100"),
+            Beneficiary::new(&Uuid::new_v4().to_string(), "100.00"),
         ];
 
         assert_eq!(
-            validate_expense("100", &euro(), &beneficiaries),
+            validate_expense("100.00", &euro(), &beneficiaries),
             Err(ExpenseError::MalformedAmount)
         );
     }
@@ -411,7 +411,7 @@ mod tests {
     #[test]
     fn test_validate_expense_refuses_no_beneficiaries() {
         assert_eq!(
-            validate_expense("100", &euro(), &vec![]),
+            validate_expense("100.00", &euro(), &vec![]),
             Err(ExpenseError::NoBeneficiaries)
         );
     }
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_validate_expense_accepts_as_many_beneficiaries_as_the_cap() {
         assert_eq!(
-            validate_expense("100", &euro(), &beneficiaries_sharing_100(100)),
+            validate_expense("100.00", &euro(), &beneficiaries_sharing_100(100)),
             Ok(())
         );
     }
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn test_validate_expense_refuses_one_beneficiary_over_the_cap() {
         assert_eq!(
-            validate_expense("100", &euro(), &beneficiaries_sharing_100(101)),
+            validate_expense("100.00", &euro(), &beneficiaries_sharing_100(101)),
             Err(ExpenseError::TooManyBeneficiaries)
         );
     }
@@ -457,7 +457,7 @@ mod tests {
             Err(ExpenseError::UnsupportedSubunits)
         );
         assert_eq!(
-            validate_expense("0", &euro(), &beneficiaries),
+            validate_expense("0.00", &euro(), &beneficiaries),
             Err(ExpenseError::NonPositiveAmount)
         );
     }
@@ -475,13 +475,13 @@ mod tests {
 
         for beneficiaries in [listed_twice, malformed_share, non_positive_share] {
             assert_eq!(
-                validate_expense("100", &euro(), &beneficiaries),
+                validate_expense("100.00", &euro(), &beneficiaries),
                 Err(ExpenseError::TooManyBeneficiaries)
             );
         }
 
         assert_eq!(
-            validate_expense("99", &euro(), &beneficiaries_sharing_100(101)),
+            validate_expense("99.00", &euro(), &beneficiaries_sharing_100(101)),
             Err(ExpenseError::TooManyBeneficiaries)
         );
     }
@@ -490,12 +490,12 @@ mod tests {
     fn test_validate_expense_refuses_a_beneficiary_listed_twice() {
         let user_uuid = Uuid::new_v4().to_string();
         let beneficiaries = vec![
-            Beneficiary::new(&user_uuid, "50"),
-            Beneficiary::new(&user_uuid, "50"),
+            Beneficiary::new(&user_uuid, "50.00"),
+            Beneficiary::new(&user_uuid, "50.00"),
         ];
 
         assert_eq!(
-            validate_expense("100", &euro(), &beneficiaries),
+            validate_expense("100.00", &euro(), &beneficiaries),
             Err(ExpenseError::DuplicateBeneficiary)
         );
     }
@@ -503,16 +503,16 @@ mod tests {
     #[test]
     fn test_validate_expense_refuses_shares_that_do_not_add_up() {
         let beneficiaries = vec![
-            Beneficiary::new(&Uuid::new_v4().to_string(), "50"),
+            Beneficiary::new(&Uuid::new_v4().to_string(), "50.00"),
             Beneficiary::new(&Uuid::new_v4().to_string(), "49.99"),
         ];
 
         assert_eq!(
-            validate_expense("100", &euro(), &beneficiaries),
+            validate_expense("100.00", &euro(), &beneficiaries),
             Err(ExpenseError::SharesBelowTotalAmount)
         );
         assert_eq!(
-            validate_expense("99", &euro(), &beneficiaries),
+            validate_expense("99.00", &euro(), &beneficiaries),
             Err(ExpenseError::SharesExceedTotalAmount)
         );
     }
@@ -1366,6 +1366,239 @@ mod tests {
         assert_eq!(
             validate_expense("0.10", &euro(), &beneficiaries),
             Err(ExpenseError::NonPositiveShare)
+        );
+    }
+
+    #[test]
+    fn test_canonical_amount_writes_an_amount_the_one_way() {
+        for (amount, written) in [
+            ("12", "12.00"),
+            ("12.5", "12.50"),
+            ("12.50", "12.50"),
+            ("007", "7.00"),
+            ("0", "0.00"),
+            ("0.5", "0.50"),
+            ("999999999999999.99", "999999999999999.99"),
+        ] {
+            assert_eq!(
+                canonical_amount(amount, &euro()).as_deref(),
+                Ok(written),
+                "{amount}"
+            );
+        }
+
+        for (amount, written) in [("12", "12"), ("007", "7"), ("0", "0")] {
+            assert_eq!(
+                canonical_amount(amount, &yen()).as_deref(),
+                Ok(written),
+                "{amount}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonical_amount_refuses_what_it_cannot_write_exactly() {
+        for amount in [
+            "", "12.", ".5", "12.345", "-12", "+12", "1e2", "12,5", " 12", "abc",
+        ] {
+            assert_eq!(
+                canonical_amount(amount, &euro()),
+                Err(ExpenseError::MalformedAmount),
+                "{amount:?}"
+            );
+        }
+
+        assert_eq!(
+            canonical_amount("12.50", &yen()),
+            Err(ExpenseError::UnsupportedSubunits)
+        );
+        assert_eq!(
+            canonical_amount("12.00", &yen()),
+            Err(ExpenseError::UnsupportedSubunits)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_takes_only_what_canonical_amount_writes() {
+        for amount in ["12", "12.5", "012.00", "0012.50"] {
+            assert_eq!(
+                validate_expense(amount, &euro(), &one_beneficiary(amount)),
+                Err(ExpenseError::MalformedAmount),
+                "{amount}"
+            );
+        }
+
+        assert_eq!(
+            validate_expense("012", &yen(), &one_beneficiary("012")),
+            Err(ExpenseError::MalformedAmount)
+        );
+
+        // A share too, under an amount written as it should be.
+        assert_eq!(
+            validate_expense("12.00", &euro(), &one_beneficiary("12")),
+            Err(ExpenseError::MalformedAmount)
+        );
+
+        for (amount, currency) in [("12.00", euro()), ("12.50", euro()), ("12", yen())] {
+            assert_eq!(
+                validate_expense(amount, &currency, &one_beneficiary(amount)),
+                Ok(()),
+                "{amount}"
+            );
+        }
+    }
+
+    /// The shares of `uuids` as written, whatever way each was set.
+    fn written_shares(
+        amount: &str,
+        currency: &Currency,
+        fixed: &[&str],
+        percentages: &[&str],
+        weights: &[&str],
+    ) -> Vec<String> {
+        let uuids = uuids(fixed.len().max(percentages.len()).max(weights.len()).max(2));
+
+        compute_beneficiaries(
+            amount,
+            currency,
+            &uuids,
+            &settings_of(&uuids, fixed),
+            &settings_of(&uuids, percentages),
+            &settings_of(&uuids, weights),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|beneficiary| beneficiary.share)
+        .collect()
+    }
+
+    #[test]
+    fn test_shares_are_written_with_their_subunits_however_they_come_about() {
+        // Split.
+        assert_eq!(
+            written_shares("100.00", &euro(), &[], &[], &[]),
+            vec!["50.00", "50.00"]
+        );
+        // Split, of an amount given in whole units.
+        assert_eq!(
+            written_shares("100", &euro(), &[], &[], &[]),
+            vec!["50.00", "50.00"]
+        );
+        // Fixed, however they are given, and what they leave.
+        assert_eq!(
+            written_shares("22.50", &euro(), &["10", "12.5"], &[], &[]),
+            vec!["10.00", "12.50"]
+        );
+        assert_eq!(
+            written_shares("100", &euro(), &["10"], &[], &[]),
+            vec!["10.00", "90.00"]
+        );
+        // A percentage.
+        assert_eq!(
+            written_shares("80", &euro(), &[], &["25", "75"], &[]),
+            vec!["20.00", "60.00"]
+        );
+        // A weight.
+        assert_eq!(
+            written_shares("100", &euro(), &[], &[], &["2", "1", "1"]),
+            vec!["50.00", "25.00", "25.00"]
+        );
+        // Nothing yet, as a form asks before an amount is typed.
+        assert_eq!(
+            written_shares("0", &euro(), &[], &[], &[]),
+            vec!["0.00", "0.00"]
+        );
+    }
+
+    #[test]
+    fn test_shares_are_written_in_whole_units_in_a_currency_without_a_subunit() {
+        assert_eq!(
+            written_shares("100", &yen(), &[], &[], &[]),
+            vec!["50", "50"]
+        );
+        assert_eq!(
+            written_shares("100", &yen(), &["10"], &[], &[]),
+            vec!["10", "90"]
+        );
+        assert_eq!(
+            written_shares("80", &yen(), &[], &["25", "75"], &[]),
+            vec!["20", "60"]
+        );
+        assert_eq!(
+            written_shares("100", &yen(), &[], &[], &["2", "1", "1"]),
+            vec!["50", "25", "25"]
+        );
+        assert_eq!(written_shares("0", &yen(), &[], &[], &[]), vec!["0", "0"]);
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_subunits_the_currency_does_not_have() {
+        let uuids = uuids(2);
+        let none = HashMap::new();
+        let compute = |amount: &str, currency: &Currency, fixed: &HashMap<String, String>| {
+            compute_beneficiaries(amount, currency, &uuids, fixed, &none, &none).map(|_| ())
+        };
+
+        assert_eq!(
+            compute("12.50", &yen(), &none),
+            Err(ExpenseError::UnsupportedSubunits)
+        );
+        assert_eq!(
+            compute("12", &yen(), &settings_of(&uuids, &["1.50"])),
+            Err(ExpenseError::UnsupportedSubunits)
+        );
+        assert_eq!(
+            compute("12.345", &euro(), &none),
+            Err(ExpenseError::MalformedAmount)
+        );
+        assert_eq!(
+            compute("12", &euro(), &settings_of(&uuids, &["1.005"])),
+            Err(ExpenseError::MalformedAmount)
+        );
+    }
+
+    #[test]
+    fn test_what_compute_beneficiaries_writes_validate_expense_takes_as_it_is() {
+        let uuids = uuids(3);
+        let none = HashMap::new();
+
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "10".to_string());
+
+        let beneficiaries =
+            compute_beneficiaries("100.00", &euro(), &uuids, &fixed_shares, &none, &none).unwrap();
+
+        assert_eq!(validate_expense("100.00", &euro(), &beneficiaries), Ok(()));
+    }
+
+    #[test]
+    fn test_an_expense_holds_its_amounts_written_the_one_way() {
+        let beneficiaries = vec![
+            Beneficiary::new(&Uuid::new_v4().to_string(), "12.5"),
+            Beneficiary::with_percentage(&Uuid::new_v4().to_string(), "87.50", "87.5"),
+        ];
+
+        let expense =
+            Expense::new(&Uuid::new_v4().to_string(), "100", &euro(), &beneficiaries).unwrap();
+
+        assert_eq!(expense.amount, "100.00");
+        assert_eq!(expense.beneficiaries[0].share, "12.50");
+        assert_eq!(expense.beneficiaries[1].share, "87.50");
+        assert_eq!(
+            expense.beneficiaries[1].share_percentage.as_deref(),
+            Some("87.5")
+        );
+    }
+
+    #[test]
+    fn test_an_expense_refuses_more_subunits_than_its_currency_has() {
+        let creditor_uuid = Uuid::new_v4().to_string();
+
+        assert_eq!(
+            Expense::new(&creditor_uuid, "1.005", &euro(), &one_beneficiary("1.005"))
+                .map(|_| ())
+                .unwrap_err(),
+            ExpenseError::UnsupportedSubunits
         );
     }
 }

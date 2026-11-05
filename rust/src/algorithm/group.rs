@@ -184,9 +184,11 @@ impl Group {
     ///
     /// # Returns
     ///
-    /// A `HashMap` where the keys are `Uuid` representing user IDs and the values are `f64`
-    /// representing the net debt for each user. A positive value indicates that the user is
-    /// owed money, while a negative value indicates that the user owes money.
+    /// A `HashMap` where the keys are `Uuid` representing user IDs and the values are strings
+    /// representing the net debt for each user, written as
+    /// [canonical_amount](crate::algorithm::expense::canonical_amount) writes an amount, with a
+    /// minus in front when it is negative. A positive value indicates that the user is owed
+    /// money, while a negative value indicates that the user owes money.
     ///
     /// # Examples
     ///
@@ -200,7 +202,7 @@ impl Group {
     ///
     /// let net_debts = group.calculate_net_debts_per_user().unwrap();
     /// for (user_uuid, debt) in net_debts {
-    ///     println!("User {} has a net debt of {:.2}", user_uuid, debt);
+    ///     println!("User {} has a net debt of {}", user_uuid, debt);
     /// }
     /// ```
     ///
@@ -221,13 +223,16 @@ impl Group {
         let mut net_debts = HashMap::new();
 
         for user_uuid in self.users_uuid.deref() {
-            net_debts.insert(user_uuid.clone(), BigDecimal::zero().to_plain_string());
+            net_debts.insert(
+                user_uuid.clone(),
+                self.currency.write_amount(&BigDecimal::zero()),
+            );
         }
 
         for expense in self.expenses.deref() {
             let net_debt = net_debts
                 .entry(expense.creditor_uuid.clone())
-                .or_insert(BigDecimal::zero().to_plain_string());
+                .or_insert(self.currency.write_amount(&BigDecimal::zero()));
 
             let mut net_debt =
                 BigDecimal::from_str(&net_debt).map_err(|_| GroupError::MalformedAmount)?;
@@ -235,12 +240,15 @@ impl Group {
             net_debt +=
                 BigDecimal::from_str(&expense.amount).map_err(|_| GroupError::MalformedAmount)?;
 
-            net_debts.insert(expense.creditor_uuid.clone(), net_debt.to_plain_string());
+            net_debts.insert(
+                expense.creditor_uuid.clone(),
+                self.currency.write_amount(&net_debt),
+            );
 
             for beneficiary in &expense.beneficiaries {
                 let beneficiary_net_debt = net_debts
                     .entry(beneficiary.user_uuid.clone())
-                    .or_insert(BigDecimal::zero().to_plain_string());
+                    .or_insert(self.currency.write_amount(&BigDecimal::zero()));
 
                 let mut beneficiary_net_debt = BigDecimal::from_str(&beneficiary_net_debt)
                     .map_err(|_| GroupError::MalformedAmount)?;
@@ -250,7 +258,7 @@ impl Group {
 
                 net_debts.insert(
                     beneficiary.user_uuid.clone(),
-                    beneficiary_net_debt.to_plain_string(),
+                    self.currency.write_amount(&beneficiary_net_debt),
                 );
             }
         }
@@ -268,7 +276,8 @@ impl Group {
     /// # Returns
     ///
     /// A vector of [Transaction]. Each transaction includes the debtor's user ID, the creditor's
-    /// user ID, and the amount to be transferred.
+    /// user ID, and the amount to be transferred, written as
+    /// [canonical_amount](crate::algorithm::expense::canonical_amount) writes one.
     ///
     /// # Examples
     ///
@@ -324,7 +333,7 @@ impl Group {
             result.push(Transaction::new(
                 &debtor.user_uuid,
                 &creditor.user_uuid,
-                &transfer_amount.to_plain_string(),
+                &self.currency.write_amount(&transfer_amount),
             ));
 
             let remaining_debt = debtor.amount - transfer_amount.clone();
