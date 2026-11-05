@@ -134,6 +134,9 @@ pub struct GroupExpenseBeneficiary {
     /// The percentage of the expense's amount the share was set as, `None`
     /// for one set as an amount or split.
     pub share_percentage: Option<String>,
+    /// How many parts of what the others leave the share was set as, `None`
+    /// for one set otherwise.
+    pub share_weight: Option<String>,
 }
 
 /// One version of a group expense, as its author signs it: what it opens to,

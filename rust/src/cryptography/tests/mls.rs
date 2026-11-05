@@ -4300,6 +4300,7 @@ mod tests {
                 share: "42.00".to_string(),
                 is_share_fixed: false,
                 share_percentage: None,
+                share_weight: None,
             }],
             is_settlement: false,
         }

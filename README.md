@@ -6,7 +6,7 @@ A Rust library for **shared expense management** and **secure cryptographic util
 
 ### **Expense Management**
 - **Track Expenses**: Easily add and manage expenses among users.
-- **Flexible Shares**: Split an expense evenly, name a beneficiary's share as an amount, or set it as a percentage of the amount, in any mix. Shares are rounded so that they always add up to the amount exactly.
+- **Flexible Shares**: Split an expense evenly, name a beneficiary's share as an amount, set it as a percentage of the amount, or weigh it against the others (2, 1 and 1 of 100 is 50, 25 and 25), in any mix. Shares are rounded so that they always add up to the amount exactly.
 - **Calculate Debts**: Automatically calculate net debts for each user.
 - **Equilibrate Transactions**: Determine the optimal set of transactions to settle debts.
 - **Deterministic Calculations**: Ensure consistent and predictable results using UUIDs for tie-breaking.
@@ -59,7 +59,7 @@ fn main() {
     fixed_shares.insert(bob_uuid.clone(), String::from("50.00"));
     
     let beneficiaries =
-        compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares, &HashMap::new())
+        compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares, &HashMap::new(), &HashMap::new())
             .unwrap();
 
     let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();

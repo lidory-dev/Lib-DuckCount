@@ -151,8 +151,15 @@ mod tests {
 
         let amount = "100.00";
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            &currency,
+            &beneficiary_uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         // One share should be 33.34 and the others 33.33
@@ -193,8 +200,15 @@ mod tests {
 
         let amount = "99999.00";
         let currency = Currency::new("Euro", "€", true).unwrap();
-        let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            &currency,
+            &beneficiary_uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         let mut count_33333 = 0;
@@ -230,8 +244,15 @@ mod tests {
 
         let amount = "1000";
         let currency = Currency::new("Yen", "¥", false).unwrap();
-        let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap();
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            &currency,
+            &beneficiary_uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         let _ = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
 
         // One share should be 334 and the others 333.
@@ -278,7 +299,15 @@ mod tests {
         let beneficiary_uuids: Vec<String> =
             (0..count).map(|_| Uuid::new_v4().to_string()).collect();
 
-        compute_beneficiaries("100", &euro(), &beneficiary_uuids, &HashMap::new(), &HashMap::new()).unwrap()
+        compute_beneficiaries(
+            "100",
+            &euro(),
+            &beneficiary_uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -295,9 +324,15 @@ mod tests {
             ("12.5", euro()),
             ("1000", yen()),
         ] {
-            let beneficiaries =
-                compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new())
-                    .unwrap();
+            let beneficiaries = compute_beneficiaries(
+                amount,
+                &currency,
+                &beneficiary_uuids,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
             assert_eq!(
                 validate_expense(amount, &currency, &beneficiaries),
@@ -487,13 +522,13 @@ mod tests {
         (0..count).map(|_| Uuid::new_v4().to_string()).collect()
     }
 
-    /// Each of `uuids` with the percentage at the same place in `percentages`, a blank one having none.
-    fn percentages_of(uuids: &[String], percentages: &[&str]) -> HashMap<String, String> {
+    /// Each of `uuids` with the percentage or weight at the same place in `settings`, a blank one having none.
+    fn settings_of(uuids: &[String], settings: &[&str]) -> HashMap<String, String> {
         uuids
             .iter()
-            .zip(percentages)
-            .filter(|(_, percentage)| !percentage.is_empty())
-            .map(|(uuid, percentage)| (uuid.clone(), percentage.to_string()))
+            .zip(settings)
+            .filter(|(_, setting)| !setting.is_empty())
+            .map(|(uuid, setting)| (uuid.clone(), setting.to_string()))
             .collect()
     }
 
@@ -511,7 +546,8 @@ mod tests {
             currency,
             &uuids,
             &HashMap::new(),
-            &percentages_of(&uuids, percentages),
+            &settings_of(&uuids, percentages),
+            &HashMap::new(),
         )
         .unwrap()
         .iter()
@@ -553,7 +589,8 @@ mod tests {
             &euro(),
             &uuids,
             &fixed_shares,
-            &percentages_of(&uuids, &["25"]),
+            &settings_of(&uuids, &["25"]),
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -589,7 +626,8 @@ mod tests {
             &euro(),
             &uuids,
             &fixed_shares,
-            &percentages_of(&uuids, &["25"]),
+            &settings_of(&uuids, &["25"]),
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -639,7 +677,8 @@ mod tests {
                 &euro(),
                 &uuids,
                 &HashMap::new(),
-                &percentages_of(&uuids, &[percentage]),
+                &settings_of(&uuids, &[percentage]),
+                &HashMap::new(),
             )
             .unwrap()
             .iter()
@@ -661,7 +700,8 @@ mod tests {
                 &euro(),
                 &uuids,
                 &HashMap::new(),
-                &percentages_of(&uuids, percentages),
+                &settings_of(&uuids, percentages),
+                &HashMap::new(),
             )
             .map(|_| ())
         };
@@ -698,7 +738,8 @@ mod tests {
                 &euro(),
                 &uuids,
                 &fixed_shares,
-                &percentages_of(&uuids, &["", percentage]),
+                &settings_of(&uuids, &["", percentage]),
+                &HashMap::new(),
             )
             .map(|beneficiaries| beneficiaries[1].share.clone())
         };
@@ -720,7 +761,8 @@ mod tests {
                 &euro(),
                 &uuids,
                 &HashMap::new(),
-                &percentages_of(&uuids, &[percentage]),
+                &settings_of(&uuids, &[percentage]),
+                &HashMap::new(),
             )
             .map(|_| ())
         };
@@ -736,11 +778,7 @@ mod tests {
         }
 
         for zero in ["0", "0.0", "0.00", "000"] {
-            assert_eq!(
-                compute(zero),
-                Err(ExpenseError::NonPositiveShare),
-                "{zero}"
-            );
+            assert_eq!(compute(zero), Err(ExpenseError::NonPositiveShare), "{zero}");
         }
     }
 
@@ -754,7 +792,8 @@ mod tests {
                 &euro(),
                 &uuids,
                 &HashMap::new(),
-                &percentages_of(&[Uuid::new_v4().to_string()], &["100"]),
+                &settings_of(&[Uuid::new_v4().to_string()], &["100"]),
+                &HashMap::new(),
             )
             .map(|_| ()),
             Err(ExpenseError::FixedShareForUnknownBeneficiary)
@@ -773,10 +812,11 @@ mod tests {
                 &euro(),
                 &uuids,
                 &fixed_shares,
-                &percentages_of(&uuids, &["50"]),
+                &settings_of(&uuids, &["50"]),
+                &HashMap::new(),
             )
             .map(|_| ()),
-            Err(ExpenseError::FixedShareAndPercentage)
+            Err(ExpenseError::ShareSetMoreThanOneWay)
         );
     }
 
@@ -800,7 +840,8 @@ mod tests {
                     &euro(),
                     &uuids,
                     &HashMap::new(),
-                    &percentages_of(&uuids, percentages),
+                    &settings_of(&uuids, percentages),
+                    &HashMap::new(),
                 )
                 .unwrap();
 
@@ -893,7 +934,8 @@ mod tests {
             &euro(),
             &uuids,
             &HashMap::new(),
-            &percentages_of(&uuids, &["1"]),
+            &settings_of(&uuids, &["1"]),
+            &HashMap::new(),
         )
         .unwrap();
 
@@ -914,6 +956,416 @@ mod tests {
         assert_eq!(
             validate_expense("100", &yen(), &beneficiaries),
             Err(ExpenseError::UnsupportedSubunits)
+        );
+    }
+
+    /// The shares `weights` of `amount` come to, in order, a blank weight having none, written as
+    /// numbers so that a test does not depend on how many zeros they end in.
+    fn shares_for_weights(amount: &str, currency: &Currency, weights: &[&str]) -> Vec<BigDecimal> {
+        let uuids = uuids(weights.len());
+
+        compute_beneficiaries(
+            amount,
+            currency,
+            &uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &settings_of(&uuids, weights),
+        )
+        .unwrap()
+        .iter()
+        .map(|beneficiary| BigDecimal::from_str(&beneficiary.share).unwrap())
+        .collect()
+    }
+
+    #[test]
+    fn test_weights_divide_the_amount_into_parts() {
+        // Four parts of 25.
+        assert_eq!(
+            shares_for_weights("100", &euro(), &["2", "1", "1"]),
+            numbers(&["50", "25", "25"])
+        );
+        assert_eq!(
+            shares_for_weights("1000", &yen(), &["3", "1"]),
+            numbers(&["750", "250"])
+        );
+    }
+
+    #[test]
+    fn test_somebody_with_no_weight_counts_for_one_part() {
+        assert_eq!(
+            shares_for_weights("100", &euro(), &["2", "", ""]),
+            numbers(&["50", "25", "25"])
+        );
+    }
+
+    #[test]
+    fn test_a_weight_may_be_part_of_a_part() {
+        assert_eq!(
+            shares_for_weights("30.00", &euro(), &["1", "0.5"]),
+            numbers(&["20", "10"])
+        );
+        assert_eq!(
+            shares_for_weights("100.00", &euro(), &["1.25", "3.75"]),
+            numbers(&["25", "75"])
+        );
+    }
+
+    #[test]
+    fn test_only_how_weights_compare_counts() {
+        assert_eq!(
+            shares_for_weights("100", &euro(), &["4", "2", "2"]),
+            shares_for_weights("100", &euro(), &["2", "1", "1"])
+        );
+    }
+
+    #[test]
+    fn test_equal_weights_divide_as_no_weights_do() {
+        assert_eq!(
+            shares_for_weights("100.00", &euro(), &["1", "1", "1"]),
+            numbers(&["33.34", "33.33", "33.33"])
+        );
+        assert_eq!(
+            shares_for_weights("100.00", &euro(), &["", "", ""]),
+            numbers(&["33.34", "33.33", "33.33"])
+        );
+    }
+
+    #[test]
+    fn test_subunits_left_by_rounding_go_to_who_lost_the_most_of_their_weight() {
+        // 3.33 and 6.67, of which the second lost the most rounding down.
+        assert_eq!(
+            shares_for_weights("0.10", &euro(), &["1", "2"]),
+            numbers(&["0.03", "0.07"])
+        );
+        // 666.67 and 333.33, whole units here.
+        assert_eq!(
+            shares_for_weights("1000", &yen(), &["2", "1"]),
+            numbers(&["667", "333"])
+        );
+    }
+
+    #[test]
+    fn test_weights_share_what_fixed_shares_and_percentages_leave() {
+        let uuids = uuids(4);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "10.00".to_string());
+
+        let beneficiaries = compute_beneficiaries(
+            "100.00",
+            &euro(),
+            &uuids,
+            &fixed_shares,
+            &settings_of(&uuids, &["", "25"]),
+            &settings_of(&uuids, &["", "", "2"]),
+        )
+        .unwrap();
+
+        let shares: Vec<BigDecimal> = beneficiaries
+            .iter()
+            .map(|beneficiary| BigDecimal::from_str(&beneficiary.share).unwrap())
+            .collect();
+
+        // 10 fixed and 25% of 100 leave 65, two parts of three for the third, one for the last.
+        assert_eq!(shares, numbers(&["10", "25", "43.33", "21.67"]));
+        assert_eq!(validate_expense("100.00", &euro(), &beneficiaries), Ok(()));
+    }
+
+    #[test]
+    fn test_a_weight_is_stated_for_everybody_sharing_what_is_left_once_anybody_has_one() {
+        let uuids = uuids(4);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "10.00".to_string());
+
+        let beneficiaries = compute_beneficiaries(
+            "100.00",
+            &euro(),
+            &uuids,
+            &fixed_shares,
+            &HashMap::new(),
+            &settings_of(&uuids, &["", "", "2"]),
+        )
+        .unwrap();
+
+        let weights: Vec<Option<&str>> = beneficiaries
+            .iter()
+            .map(|beneficiary| beneficiary.share_weight.as_deref())
+            .collect();
+
+        assert_eq!(weights, vec![None, Some("1"), Some("2"), Some("1")]);
+    }
+
+    #[test]
+    fn test_no_weight_is_stated_when_nobody_has_one() {
+        let uuids = uuids(2);
+
+        let beneficiaries = compute_beneficiaries(
+            "100.00",
+            &euro(),
+            &uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(beneficiaries.iter().all(|b| b.share_weight.is_none()));
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_weight_it_cannot_take() {
+        let uuids = uuids(2);
+        let compute = |weight: &str| {
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &HashMap::new(),
+                &settings_of(&uuids, &[weight]),
+            )
+            .map(|_| ())
+        };
+
+        for malformed in [
+            "abc", "-1", "+1", "1.", ".5", "1.123", "1e1", "1_0", "1000", "٥", " 1",
+        ] {
+            assert_eq!(
+                compute(malformed),
+                Err(ExpenseError::MalformedWeight),
+                "{malformed}"
+            );
+        }
+
+        for zero in ["0", "0.0", "0.00", "000"] {
+            assert_eq!(compute(zero), Err(ExpenseError::NonPositiveShare), "{zero}");
+        }
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_weight_of_nobody_on_the_expense() {
+        let uuids = uuids(1);
+
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &HashMap::new(),
+                &settings_of(&[Uuid::new_v4().to_string()], &["2"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::FixedShareForUnknownBeneficiary)
+        );
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_a_share_set_as_a_weight_and_anything_else() {
+        let uuids = uuids(2);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "50.00".to_string());
+
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &fixed_shares,
+                &HashMap::new(),
+                &settings_of(&uuids, &["2"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::ShareSetMoreThanOneWay)
+        );
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &HashMap::new(),
+                &settings_of(&uuids, &["50"]),
+                &settings_of(&uuids, &["2"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::ShareSetMoreThanOneWay)
+        );
+    }
+
+    #[test]
+    fn test_compute_beneficiaries_refuses_fixed_shares_past_the_amount_before_weights() {
+        let uuids = uuids(2);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "150.00".to_string());
+
+        assert_eq!(
+            compute_beneficiaries(
+                "100.00",
+                &euro(),
+                &uuids,
+                &fixed_shares,
+                &HashMap::new(),
+                &settings_of(&uuids, &["", "2"]),
+            )
+            .map(|_| ()),
+            Err(ExpenseError::SharesExceedTotalAmount)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_accepts_every_share_a_weight_is_worked_out_to() {
+        let weights = [
+            vec!["1"],
+            vec!["2", "1", "1"],
+            vec!["1", "1", "1"],
+            vec!["1", "99"],
+            vec!["0.5", "1", "1.5", "2.25"],
+            vec!["7", "13", "80", "3", "11", "2"],
+            vec!["2", "", ""],
+        ];
+
+        for weights in &weights {
+            for amount in ["100.00", "10.00", "99.99", "1234.56", "7.77", "1000000.01"] {
+                let uuids = uuids(weights.len());
+
+                let beneficiaries = compute_beneficiaries(
+                    amount,
+                    &euro(),
+                    &uuids,
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &settings_of(&uuids, weights),
+                )
+                .unwrap();
+
+                assert_eq!(
+                    validate_expense(amount, &euro(), &beneficiaries),
+                    Ok(()),
+                    "{weights:?} of {amount}: {beneficiaries:?}"
+                );
+
+                // Whichever order a receiver is served them in.
+                let reversed: Vec<Beneficiary> = beneficiaries.iter().rev().cloned().collect();
+                assert_eq!(validate_expense(amount, &euro(), &reversed), Ok(()));
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_expense_holds_many_small_weights_to_a_large_one_next_to_a_fixed_share() {
+        let uuids = uuids(22);
+        let mut fixed_shares = HashMap::new();
+        fixed_shares.insert(uuids[0].clone(), "3.33".to_string());
+
+        let mut weights = vec!["", "100"];
+        weights.extend(vec!["1"; 20]);
+
+        let beneficiaries = compute_beneficiaries(
+            "153.33",
+            &euro(),
+            &uuids,
+            &fixed_shares,
+            &HashMap::new(),
+            &settings_of(&uuids, &weights),
+        )
+        .unwrap();
+
+        assert_eq!(validate_expense("153.33", &euro(), &beneficiaries), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_share_its_weight_does_not_come_to() {
+        let validated = |amount: &str, first: (&str, &str), second: (&str, &str)| {
+            validate_expense(
+                amount,
+                &euro(),
+                &vec![
+                    Beneficiary::with_weight(&Uuid::new_v4().to_string(), first.0, first.1),
+                    Beneficiary::with_weight(&Uuid::new_v4().to_string(), second.0, second.1),
+                ],
+            )
+        };
+
+        assert_eq!(validated("100.00", ("66.67", "2"), ("33.33", "1")), Ok(()));
+        assert_eq!(validated("100.00", ("66.66", "2"), ("33.34", "1")), Ok(()));
+        // Adds up, and says something else.
+        assert_eq!(
+            validated("100.00", ("80.00", "2"), ("20.00", "1")),
+            Err(ExpenseError::ShareDiffersFromWeight)
+        );
+        // By a subunit, on weights that fall exactly on one.
+        assert_eq!(
+            validated("100.00", ("50.01", "1"), ("49.99", "1")),
+            Err(ExpenseError::ShareDiffersFromWeight)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_takes_weights_next_to_a_fixed_share_and_a_percentage() {
+        let beneficiaries = vec![
+            Beneficiary::new(&Uuid::new_v4().to_string(), "40.00"),
+            Beneficiary::with_percentage(&Uuid::new_v4().to_string(), "20.00", "20"),
+            Beneficiary::with_weight(&Uuid::new_v4().to_string(), "30.00", "3"),
+            Beneficiary::with_weight(&Uuid::new_v4().to_string(), "10.00", "1"),
+        ];
+
+        assert_eq!(validate_expense("100.00", &euro(), &beneficiaries), Ok(()));
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_share_set_as_a_percentage_and_a_weight() {
+        let mut beneficiary =
+            Beneficiary::with_percentage(&Uuid::new_v4().to_string(), "100.00", "100");
+        beneficiary.share_weight = Some("1".to_string());
+
+        assert_eq!(
+            validate_expense("100.00", &euro(), &vec![beneficiary]),
+            Err(ExpenseError::ShareSetMoreThanOneWay)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_weight_it_cannot_read() {
+        let one_with = |weight: &str| {
+            vec![Beneficiary::with_weight(
+                &Uuid::new_v4().to_string(),
+                "100.00",
+                weight,
+            )]
+        };
+
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("two")),
+            Err(ExpenseError::MalformedWeight)
+        );
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("")),
+            Err(ExpenseError::MalformedWeight)
+        );
+        assert_eq!(
+            validate_expense("100.00", &euro(), &one_with("0")),
+            Err(ExpenseError::NonPositiveShare)
+        );
+    }
+
+    #[test]
+    fn test_validate_expense_refuses_a_weight_too_small_to_come_to_anything() {
+        let uuids = uuids(2);
+
+        // 0.1 and 9.9 of 0.10, the first rounding to nothing, which no beneficiary can owe.
+        let beneficiaries = compute_beneficiaries(
+            "0.10",
+            &euro(),
+            &uuids,
+            &HashMap::new(),
+            &HashMap::new(),
+            &settings_of(&uuids, &["1", "99"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            validate_expense("0.10", &euro(), &beneficiaries),
+            Err(ExpenseError::NonPositiveShare)
         );
     }
 }

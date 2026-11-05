@@ -33,14 +33,16 @@ pub enum ExpenseError {
     /// There must be at least one beneficiary for an expense.
     #[error("There must be at least one beneficiary for an expense.")]
     NoBeneficiaries,
-    /// A fixed share or a percentage was assigned to a UUID that is not among the beneficiaries.
+    /// A fixed share, a percentage or a weight was assigned to a UUID that is not among the beneficiaries.
     #[error(
-        "A fixed share or a percentage was assigned to a UUID that is not among the beneficiaries."
+        "A fixed share, a percentage or a weight was assigned to a UUID that is not among the beneficiaries."
     )]
     FixedShareForUnknownBeneficiary,
-    /// A beneficiary was given both a fixed share and a percentage.
-    #[error("A beneficiary was given both a fixed share and a percentage.")]
-    FixedShareAndPercentage,
+    /// A beneficiary's share was set more than one way: as a fixed share, a percentage or a weight.
+    #[error(
+        "A beneficiary's share was set more than one way: as a fixed share, a percentage or a weight."
+    )]
+    ShareSetMoreThanOneWay,
     /// The amount is malformed.
     #[error("The amount is malformed.")]
     MalformedAmount,
@@ -50,9 +52,12 @@ pub enum ExpenseError {
     /// A share is not what the percentage it was set as comes to.
     #[error("A share is not what the percentage it was set as comes to.")]
     ShareDiffersFromPercentage,
-    /// A division by zerro occured.
-    #[error("A division by zero occured.")]
-    DivisionByZero,
+    /// A weight is malformed.
+    #[error("The weight is malformed.")]
+    MalformedWeight,
+    /// A share is not what the weight it was set as comes to.
+    #[error("A share is not what the weight it was set as comes to.")]
+    ShareDiffersFromWeight,
     /// A type could not be converted.
     #[error("A type could not be converted.")]
     InternalTypeConversionFailed,
@@ -118,18 +123,25 @@ const MAX_WHOLE_DIGITS: usize = 15;
 /// with a subunit: its cents.
 const MAX_SUBUNIT_DIGITS: usize = 2;
 
-/// The most digits a percentage may have before its decimal point: as many as 100, the most
-/// that shares can add up to.
-const MAX_PERCENTAGE_WHOLE_DIGITS: usize = 3;
+/// The most digits a percentage or a weight may have before its decimal point: as many as 100,
+/// the most that shares can add up to, which is more parts than anybody counts in too.
+const MAX_SHARE_SETTING_WHOLE_DIGITS: usize = 3;
 
-/// The most digits a percentage may have after its decimal point. A client seals a percentage
-/// at one length whatever it says, which is what keeps it from telling the server by its length
-/// who pays one, so the longest one written must stay short.
-const MAX_PERCENTAGE_SUBUNIT_DIGITS: usize = 2;
+/// The most digits a percentage or a weight may have after its decimal point. A client seals
+/// each at one length whatever it says, which is what keeps it from telling the server by its
+/// length who pays one, so the longest one written must stay short.
+const MAX_SHARE_SETTING_SUBUNIT_DIGITS: usize = 2;
 
 /// Hundredths of a percent in a whole amount, which percentages are counted in so that nothing
 /// is rounded before it has to be.
 const HUNDREDTHS_IN_WHOLE: i32 = 10_000;
+
+/// The weight of a beneficiary sharing what is left who was given none, in the hundredths weights
+/// are counted in: one part, so that an even split is what no weight at all comes to.
+const DEFAULT_WEIGHT_HUNDREDTHS: i32 = 100;
+
+/// The weight a beneficiary given none is said to have once anybody else has one.
+const DEFAULT_WEIGHT: &str = "1";
 
 /// Represents an expense made by a creditor, distributed among multiple beneficiaries.
 ///
@@ -201,6 +213,7 @@ impl Expense {
     ///     &beneficiary_uuids,
     ///     &fixed_shares,
     ///     &HashMap::new(),
+    ///     &HashMap::new(),
     /// )
     /// .unwrap();
     ///
@@ -271,80 +284,25 @@ impl Expense {
     }
 }
 
-impl Expense {
-    /// Divides an amount into a given number of parts, distributing any remainder as evenly as possible.
-    ///
-    /// The amount is first converted into integer subunits using `scale` (e.g. `100` to work in cents),
-    /// so the division avoids floating-point rounding errors. Every part receives the integer quotient,
-    /// and the leftover subunits are handed out one at a time to the first parts. As a result the parts
-    /// differ by at most one subunit and their sum equals the original amount exactly.
-    ///
-    /// # Arguments
-    ///
-    /// * `amount_str` - The amount to divide, as a decimal string.
-    /// * `parts` - The number of parts to divide the amount into.
-    /// * `scale` - The number of subunits per whole unit (e.g. `100` for cents, `1` for whole units).
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - `parts` is zero (division by zero).
-    /// - The amount is malformed and cannot be parsed.
-    /// - The amount cannot be converted into an integer number of subunits.
-    fn divide_amount(
-        amount_str: &str,
-        parts: usize,
-        scale: usize,
-    ) -> Result<Vec<BigDecimal>, ExpenseError> {
-        if parts == 0 {
-            return Err(ExpenseError::DivisionByZero);
-        }
-
-        let amount_bd = match BigDecimal::from_str(amount_str) {
-            Ok(bd) => bd,
-            Err(_) => return Err(ExpenseError::MalformedAmount),
-        };
-
-        let scale = BigInt::from(scale);
-        let total_cents_bd = &amount_bd * &scale;
-        let total_cents_bi = match total_cents_bd.to_bigint() {
-            Some(bi) => bi,
-            None => return Err(ExpenseError::InternalTypeConversionFailed),
-        };
-
-        let base_part = total_cents_bi.clone() / parts;
-        let remainder = total_cents_bi % parts;
-
-        let mut result = Vec::new();
-        for i in 0..parts {
-            let mut part_cents = base_part.clone();
-            if BigInt::from(i) < remainder {
-                part_cents += 1;
-            }
-            let part_amount =
-                BigDecimal::from(part_cents) / BigDecimal::from_bigint(scale.clone(), 0);
-            result.push(part_amount);
-        }
-
-        Ok(result)
-    }
-}
-
 /// Computes the share of every beneficiary, splitting the not-yet-assigned part of the amount
-/// equally among the beneficiaries that do not have an explicit share.
+/// among the beneficiaries that do not have an explicit share, by their weights: 2, 1 and 1 of 100
+/// makes four parts of 25, so 50, 25 and 25, and no weights at all make an even split.
 ///
 /// Beneficiaries listed in `fixed_shares` keep their explicit share, and those listed in
 /// `share_percentages` get that percentage of the whole amount, whatever the others take: each
 /// rounded to one of the two subunits around it, so that together they come to what the
 /// percentages come to, the subunits rounding leaves going to whoever lost the most to it, then to
 /// whoever comes first. The remaining amount (the total minus the sum of those shares) is
-/// divided equally among the beneficiaries without a share. The split is computed in the currency's
-/// subunits (cents when the currency has a subunit, whole units otherwise) so that the shares sum
-/// exactly to the remaining amount; any indivisible remainder is distributed one subunit at a time
-/// across the first of those beneficiaries. If every beneficiary already has an explicit share or
-/// a percentage, those shares must come to the amount.
+/// divided among the beneficiaries without a share, those not listed in `share_weights` counting
+/// for one part. The split is computed in the currency's subunits (cents when the currency has a
+/// subunit, whole units otherwise) so that the shares sum exactly to the remaining amount, any
+/// indivisible remainder going one subunit at a time to whoever lost the most to rounding, then to
+/// whoever comes first. If every beneficiary already has an explicit share or a percentage, those
+/// shares must come to the amount.
 ///
-/// The beneficiaries come back in the order of `beneficiary_user_uuids`.
+/// The beneficiaries come back in the order of `beneficiary_user_uuids`. When `share_weights` lists
+/// anybody, those splitting the remaining amount all come back with a weight, one for those it does
+/// not list, a weight meaning nothing but next to the others.
 ///
 /// # Arguments
 ///
@@ -354,20 +312,23 @@ impl Expense {
 /// * `fixed_shares` - A map from beneficiary UUID to an explicitly assigned share.
 /// * `share_percentages` - A map from beneficiary UUID to the percentage of the amount their share
 ///   is set as: `25` or `33.33`, up to two decimals.
+/// * `share_weights` - A map from beneficiary UUID to how many parts of the remaining amount their
+///   share is set as: `2` or `0.5`, up to two decimals.
 ///
 /// # Errors
 ///
 /// This function will return an error if:
-/// - A fixed share or a percentage was assigned to a UUID that is not among the beneficiaries.
-/// - A beneficiary has both a fixed share and a percentage.
-/// - The amount, any explicitly set share or any percentage is malformed and cannot be parsed.
-/// - Any fixed share or percentage is not positive.
+/// - A fixed share, a percentage or a weight was assigned to a UUID that is not among the
+///   beneficiaries.
+/// - A beneficiary's share was set more than one way, as a fixed share, a percentage or a weight.
+/// - The amount, any explicitly set share, any percentage or any weight is malformed and cannot be
+///   parsed.
+/// - Any fixed share, percentage or weight is not positive.
 /// - The sum of the shares, with each percentage taken before it is rounded, exceeds the total
 ///   expense amount.
 /// - Each beneficiary has a share or a percentage, and that sum is less than the total amount of
 ///   the expense. Three times `33.33` is therefore refused, on any amount: what it leaves is no
 ///   rounding, and is for a beneficiary without a share to pay, or for the percentages to say.
-/// - A division by zero occurs while splitting the remaining amount.
 /// - An internal type conversion fails while working out or splitting the shares.
 ///
 /// # Examples
@@ -397,6 +358,7 @@ impl Expense {
 ///     &beneficiary_uuids,
 ///     &fixed_shares,
 ///     &HashMap::new(),
+///     &HashMap::new(),
 /// )
 /// .unwrap();
 /// ```
@@ -425,6 +387,37 @@ impl Expense {
 ///     &beneficiary_uuids,
 ///     &HashMap::new(),
 ///     &share_percentages,
+///     &HashMap::new(),
+/// )
+/// .unwrap();
+/// ```
+///
+/// With a weight:
+///
+/// ```rust
+/// # use lib_duckcount::algorithm::{currency::Currency, expense::compute_beneficiaries};
+/// # use uuid::Uuid;
+/// # use std::collections::HashMap;
+///
+/// let alice_uuid = Uuid::new_v4().to_string();
+/// let bob_uuid = Uuid::new_v4().to_string();
+/// let charlie_uuid = Uuid::new_v4().to_string();
+///
+/// let currency = Currency::new("Euro", "€", true).unwrap();
+///
+/// let beneficiary_uuids = vec![alice_uuid.clone(), bob_uuid.clone(), charlie_uuid.clone()];
+///
+/// let mut share_weights = HashMap::new();
+/// share_weights.insert(alice_uuid.clone(), String::from("2"));
+///
+/// // Four parts of 25.00: Alice pays two of them, 50.00, and Bob and Charlie 25.00 each.
+/// let beneficiaries = compute_beneficiaries(
+///     "100.00",
+///     &currency,
+///     &beneficiary_uuids,
+///     &HashMap::new(),
+///     &HashMap::new(),
+///     &share_weights,
 /// )
 /// .unwrap();
 /// ```
@@ -435,6 +428,7 @@ pub fn compute_beneficiaries(
     beneficiary_user_uuids: &Vec<String>,
     fixed_shares: &HashMap<String, String>,
     share_percentages: &HashMap<String, String>,
+    share_weights: &HashMap<String, String>,
 ) -> Result<Vec<Beneficiary>, ExpenseError> {
     let amount = BigDecimal::from_str(amount).map_err(|_| ExpenseError::MalformedAmount)?;
 
@@ -460,7 +454,17 @@ pub fn compute_beneficiaries(
         }
 
         if fixed_shares.contains_key(uuid) {
-            return Err(ExpenseError::FixedShareAndPercentage);
+            return Err(ExpenseError::ShareSetMoreThanOneWay);
+        }
+    }
+
+    for uuid in share_weights.keys() {
+        if !beneficiary_user_uuids.contains(uuid) {
+            return Err(ExpenseError::FixedShareForUnknownBeneficiary);
+        }
+
+        if fixed_shares.contains_key(uuid) || share_percentages.contains_key(uuid) {
+            return Err(ExpenseError::ShareSetMoreThanOneWay);
         }
     }
 
@@ -484,12 +488,23 @@ pub fn compute_beneficiaries(
         return Err(ExpenseError::SharesExceedTotalAmount);
     }
 
-    let number_of_beneficiaries_without_share: usize =
-        beneficiary_user_uuids.len() - fixed_shares.len() - share_percentages.len();
+    // Who shares what the others leave, in the beneficiaries' order, as for the percentages.
+    let weighted_uuids: Vec<&String> = beneficiary_user_uuids
+        .iter()
+        .filter(|uuid| !fixed_shares.contains_key(*uuid) && !share_percentages.contains_key(*uuid))
+        .collect();
 
-    if number_of_beneficiaries_without_share == 0 && total_share_amount < amount {
+    if weighted_uuids.is_empty() && total_share_amount < amount {
         return Err(ExpenseError::SharesBelowTotalAmount);
     }
+
+    let weights = weighted_uuids
+        .iter()
+        .map(|uuid| match share_weights.get(*uuid) {
+            Some(weight) => parse_weight(weight),
+            None => Ok(BigInt::from(DEFAULT_WEIGHT_HUNDREDTHS)),
+        })
+        .collect::<Result<Vec<BigInt>, ExpenseError>>()?;
 
     let scale = subunit_scale(currency);
 
@@ -505,14 +520,13 @@ pub fn compute_beneficiaries(
     let remaining_amount =
         &amount - &total_fixed_amount - percentage_shares.values().sum::<BigDecimal>();
 
-    let divided_amount = match number_of_beneficiaries_without_share {
-        0 => vec![],
-        parts => Expense::divide_amount(&remaining_amount.to_plain_string(), parts, scale)?,
-    };
+    let mut divided_amount_iter =
+        shares_of_weights(&to_subunits(&remaining_amount, scale)?, &weights)
+            .into_iter()
+            .map(|share| from_subunits(share, scale));
 
     let mut beneficiaries = Vec::with_capacity(beneficiary_user_uuids.len());
 
-    let mut divided_amount_iter = divided_amount.into_iter();
     for beneficiary_user_uuid in beneficiary_user_uuids {
         if let Some(share) = fixed_shares.get(beneficiary_user_uuid) {
             beneficiaries.push(Beneficiary::new(beneficiary_user_uuid, share));
@@ -523,10 +537,17 @@ pub fn compute_beneficiaries(
                 &share_percentages[beneficiary_user_uuid],
             ));
         } else if let Some(share) = divided_amount_iter.next() {
-            beneficiaries.push(Beneficiary::new(
-                beneficiary_user_uuid,
-                &share.to_plain_string(),
-            ));
+            let share = share.to_plain_string();
+
+            beneficiaries.push(if share_weights.is_empty() {
+                Beneficiary::new(beneficiary_user_uuid, &share)
+            } else {
+                let weight = share_weights
+                    .get(beneficiary_user_uuid)
+                    .map_or(DEFAULT_WEIGHT, String::as_str);
+
+                Beneficiary::with_weight(beneficiary_user_uuid, &share, weight)
+            });
         }
     }
 
@@ -559,8 +580,10 @@ pub fn compute_beneficiaries(
 /// - The expense amount or any share is not 1 to 15 ASCII digits, followed, only in a currency with a
 ///   subunit, by an optional point and 1 or 2 digits.
 /// - The same user is listed as a beneficiary more than once.
-/// - Any percentage is malformed or not positive, or a share set as one is neither of the two
-///   subunits around what it comes to, or that exact amount when it falls on a subunit.
+/// - Any percentage or weight is malformed or not positive, or a share set as one is neither of the
+///   two subunits around what it comes to, or that exact amount when it falls on a subunit. What a
+///   weight comes to is its part of the shares that have one.
+/// - A beneficiary's share was set as both a percentage and a weight.
 ///
 /// # Examples
 ///
@@ -589,6 +612,7 @@ pub fn compute_beneficiaries(
 ///     &beneficiary_uuids,
 ///     &fixed_shares,
 ///     &HashMap::new(),
+///     &HashMap::new(),
 /// )
 /// .unwrap();
 ///
@@ -616,6 +640,7 @@ pub fn validate_expense(
 
     let mut user_uuids = HashSet::with_capacity(beneficiaries.len());
     let mut total_share_amount = BigDecimal::zero();
+    let mut weighted_shares = Vec::new();
 
     for beneficiary in beneficiaries {
         if !user_uuids.insert(&beneficiary.user_uuid) {
@@ -628,8 +653,19 @@ pub fn validate_expense(
             return Err(ExpenseError::NonPositiveShare);
         }
 
+        if beneficiary.share_percentage.is_some() && beneficiary.share_weight.is_some() {
+            return Err(ExpenseError::ShareSetMoreThanOneWay);
+        }
+
         if let Some(percentage) = &beneficiary.share_percentage {
             check_share_of_percentage(&share, percentage, &amount, currency)?;
+        }
+
+        if let Some(weight) = &beneficiary.share_weight {
+            weighted_shares.push((
+                to_subunits(&share, subunit_scale(currency))?,
+                parse_weight(weight)?,
+            ));
         }
 
         total_share_amount += share;
@@ -643,7 +679,7 @@ pub fn validate_expense(
         return Err(ExpenseError::SharesBelowTotalAmount);
     }
 
-    Ok(())
+    check_shares_of_weights(&weighted_shares)
 }
 
 /// Checks that `share`, set as `percentage` of `amount`, is what that percentage comes to: the
@@ -651,12 +687,12 @@ pub fn validate_expense(
 ///
 /// A share is all that sums read, and the percentage is what an edit works it out again from, so
 /// the two saying different things would show one thing and charge another. Either side is taken,
-/// since which way a share rounds depends on the other shares, see [shares_of_percentages], and on
+/// since which way a share rounds depends on the other shares, see [largest_remainders], and on
 /// their order, which reaches a receiver in no particular way.
 ///
 /// # Errors
 ///
-/// * `ExpenseError::MalformedPercentage` - If `percentage` is not written as [parse_percentage] reads one.
+/// * `ExpenseError::MalformedPercentage` - If `percentage` is not written as [parse_share_setting] reads one.
 /// * `ExpenseError::NonPositiveShare` - If `percentage` is zero.
 /// * `ExpenseError::ShareDiffersFromPercentage` - If `share` is any other amount.
 fn check_share_of_percentage(
@@ -669,42 +705,95 @@ fn check_share_of_percentage(
     let whole = BigInt::from(HUNDREDTHS_IN_WHOLE);
 
     let exact = to_subunits(amount, scale)? * parse_percentage(percentage)?;
-    let lowest = &exact / &whole;
-    let highest = match (&exact % &whole).is_zero() {
-        true => lowest.clone(),
-        false => &lowest + 1,
-    };
 
-    let share = to_subunits(share, scale)?;
-
-    if share < lowest || share > highest {
+    if !rounds_to(&to_subunits(share, scale)?, &exact, &whole) {
         return Err(ExpenseError::ShareDiffersFromPercentage);
     }
 
     Ok(())
 }
 
-/// Works out the share each of `hundredths`, percentages in hundredths of a percent, comes to of
-/// `amount`, all in subunits, in the same order.
+/// Checks that each of `weighted_shares`, a share in subunits with the weight it was set as, is what
+/// that weight comes to, its part of all of them, as [check_share_of_percentage] checks a percentage
+/// and for the same reasons.
 ///
-/// Each share rounds down, and then the subunits needed for them to add up to what the percentages
-/// come to together, rounded to the nearest subunit, go one each to those that lost the most,
-/// the first of them when two lost as much. Rounding each to the nearest on its own would not add
-/// up: `33.33`, `33.33` and `33.34` of 10.00 would come to 9.99, and `50` twice of 0.01 to 0.02.
-/// This way each share is still one of the two subunits around what it says, and the sum, when the
-/// percentages make up the amount, is the amount exactly.
+/// All of them, since nothing says which of the other shares were fixed amounts: an expense using
+/// any weight states one for everybody sharing what is left, see [compute_beneficiaries], so those
+/// with one are all there is to share it.
+///
+/// # Errors
+///
+/// * `ExpenseError::ShareDiffersFromWeight` - If a share is any other amount.
+fn check_shares_of_weights(weighted_shares: &[(BigInt, BigInt)]) -> Result<(), ExpenseError> {
+    let total = weighted_shares
+        .iter()
+        .map(|(share, _)| share)
+        .sum::<BigInt>();
+    let total_weight = weighted_shares
+        .iter()
+        .map(|(_, weight)| weight)
+        .sum::<BigInt>();
+
+    for (share, weight) in weighted_shares {
+        if !rounds_to(share, &(&total * weight), &total_weight) {
+            return Err(ExpenseError::ShareDiffersFromWeight);
+        }
+    }
+
+    Ok(())
+}
+
+/// Whether `share` is `numerator` divided by `denominator` rounded either way, or that exact amount
+/// when it falls on a whole number.
+fn rounds_to(share: &BigInt, numerator: &BigInt, denominator: &BigInt) -> bool {
+    let lowest = numerator / denominator;
+    let highest = match (numerator % denominator).is_zero() {
+        true => lowest.clone(),
+        false => &lowest + 1,
+    };
+
+    *share >= lowest && *share <= highest
+}
+
+/// Works out the share each of `hundredths`, percentages in hundredths of a percent, comes to of
+/// `amount`, all in subunits, in the same order: together, what the percentages come to together,
+/// rounded to the nearest subunit, each one of the two subunits around what it says.
 fn shares_of_percentages(amount: &BigInt, hundredths: &[BigInt]) -> Vec<BigInt> {
     let whole = BigInt::from(HUNDREDTHS_IN_WHOLE);
 
     let exact: Vec<BigInt> = hundredths.iter().map(|part| amount * part).collect();
     let total = (exact.iter().sum::<BigInt>() + &whole / 2) / &whole;
 
-    let mut shares: Vec<BigInt> = exact.iter().map(|part| part / &whole).collect();
+    largest_remainders(&exact, &whole, &total)
+}
+
+/// Works out the share each of `weights` comes to of `amount`, all in subunits, in the same order:
+/// together, the whole of `amount`, each one of the two subunits around its part of it.
+fn shares_of_weights(amount: &BigInt, weights: &[BigInt]) -> Vec<BigInt> {
+    let exact: Vec<BigInt> = weights.iter().map(|weight| amount * weight).collect();
+
+    largest_remainders(&exact, &weights.iter().sum::<BigInt>(), amount)
+}
+
+/// Divides each of `numerators` by `denominator` so that the results come to `total`, in the same
+/// order: each rounds down, and then the subunits needed for them to add up go one each to those
+/// that lost the most, the first of them when two lost as much.
+///
+/// Rounding each to the nearest on its own would not add up: `33.33`, `33.33` and `33.34` percent of
+/// 10.00 would come to 9.99, and `50` percent twice of 0.01 to 0.02. This way each result is still
+/// one of the two subunits around what it says, as long as `total` is the sum of the exact results,
+/// rounded to the nearest subunit at most.
+fn largest_remainders(numerators: &[BigInt], denominator: &BigInt, total: &BigInt) -> Vec<BigInt> {
+    let mut shares: Vec<BigInt> = numerators
+        .iter()
+        .map(|numerator| numerator / denominator)
+        .collect();
+
     let subunits_left = total - shares.iter().sum::<BigInt>();
 
     // A stable sort, so that an equal claim goes to whoever comes first.
-    let mut by_largest_loss: Vec<usize> = (0..exact.len()).collect();
-    by_largest_loss.sort_by_key(|&index| Reverse(&exact[index] % &whole));
+    let mut by_largest_loss: Vec<usize> = (0..numerators.len()).collect();
+    by_largest_loss.sort_by_key(|&index| Reverse(&numerators[index] % denominator));
 
     for (given, &index) in by_largest_loss.iter().enumerate() {
         if BigInt::from(given) < subunits_left {
@@ -736,9 +825,8 @@ fn from_subunits(subunits: BigInt, scale: usize) -> BigDecimal {
     BigDecimal::from(subunits) / BigDecimal::from_bigint(BigInt::from(scale), 0)
 }
 
-/// Parses `percentage`, in the only form the app writes one, into hundredths of a percent: one to
-/// [MAX_PERCENTAGE_WHOLE_DIGITS] ASCII digits, then optionally a point and one to
-/// [MAX_PERCENTAGE_SUBUNIT_DIGITS] more digits.
+/// Parses `percentage`, in the only form the app writes one, see [parse_share_setting], into
+/// hundredths of a percent.
 ///
 /// One over 100 is no malformed percentage: it is shares that exceed the amount, which is what
 /// checking the sum of the shares says of it.
@@ -748,25 +836,51 @@ fn from_subunits(subunits: BigInt, scale: usize) -> BigDecimal {
 /// * `ExpenseError::MalformedPercentage` - If `percentage` is written any other way.
 /// * `ExpenseError::NonPositiveShare` - If `percentage` is zero.
 fn parse_percentage(percentage: &str) -> Result<BigInt, ExpenseError> {
-    let (whole, subunits) = match percentage.split_once('.') {
+    parse_share_setting(percentage, ExpenseError::MalformedPercentage)
+}
+
+/// Parses `weight`, in the only form the app writes one, see [parse_share_setting], into hundredths
+/// of a part.
+///
+/// # Errors
+///
+/// * `ExpenseError::MalformedWeight` - If `weight` is written any other way.
+/// * `ExpenseError::NonPositiveShare` - If `weight` is zero: somebody with no part of an expense is
+///   no beneficiary of it.
+fn parse_weight(weight: &str) -> Result<BigInt, ExpenseError> {
+    parse_share_setting(weight, ExpenseError::MalformedWeight)
+}
+
+/// Parses `setting`, a percentage or a weight, into hundredths of it: one to
+/// [MAX_SHARE_SETTING_WHOLE_DIGITS] ASCII digits, then optionally a point and one to
+/// [MAX_SHARE_SETTING_SUBUNIT_DIGITS] more digits.
+///
+/// # Errors
+///
+/// * `malformed` - If `setting` is written any other way.
+/// * `ExpenseError::NonPositiveShare` - If `setting` is zero.
+fn parse_share_setting(setting: &str, malformed: ExpenseError) -> Result<BigInt, ExpenseError> {
+    let (whole, subunits) = match setting.split_once('.') {
         Some((whole, subunits)) => (whole, Some(subunits)),
-        None => (percentage, None),
+        None => (setting, None),
     };
 
-    if !is_digits(whole, MAX_PERCENTAGE_WHOLE_DIGITS)
-        || subunits.is_some_and(|subunits| !is_digits(subunits, MAX_PERCENTAGE_SUBUNIT_DIGITS))
+    if !is_digits(whole, MAX_SHARE_SETTING_WHOLE_DIGITS)
+        || subunits.is_some_and(|subunits| !is_digits(subunits, MAX_SHARE_SETTING_SUBUNIT_DIGITS))
     {
-        return Err(ExpenseError::MalformedPercentage);
+        return Err(malformed);
     }
 
-    let percentage =
-        BigDecimal::from_str(percentage).map_err(|_| ExpenseError::MalformedPercentage)?;
+    let setting = match BigDecimal::from_str(setting) {
+        Ok(setting) => setting,
+        Err(_) => return Err(malformed),
+    };
 
-    if percentage.is_zero() {
+    if setting.is_zero() {
         return Err(ExpenseError::NonPositiveShare);
     }
 
-    to_subunits(&percentage, 100)
+    to_subunits(&setting, 100)
 }
 
 /// Parses `amount` in the only form the app writes one: one to [MAX_WHOLE_DIGITS] ASCII

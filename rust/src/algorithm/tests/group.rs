@@ -129,8 +129,15 @@ mod tests {
         let mut fixed_shares = HashMap::new();
         fixed_shares.insert(bob_uuid.clone(), String::from("50.00"));
 
-        let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares, &HashMap::new()).unwrap();
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            &currency,
+            &beneficiary_uuids,
+            &fixed_shares,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
 
         let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
         let group = group.with_added_expense(Arc::new(expense)).unwrap();
@@ -168,8 +175,15 @@ mod tests {
         let mut fixed_shares = HashMap::new();
         fixed_shares.insert(bob_uuid.clone(), String::from("50.00"));
 
-        let beneficiaries =
-            compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares, &HashMap::new()).unwrap();
+        let beneficiaries = compute_beneficiaries(
+            amount,
+            &currency,
+            &beneficiary_uuids,
+            &fixed_shares,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
 
         let expense = Expense::new(&alice_uuid, amount, &currency, &beneficiaries).unwrap();
         let group = group.with_added_expense(Arc::new(expense)).unwrap();

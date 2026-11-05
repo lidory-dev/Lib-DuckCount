@@ -89,6 +89,7 @@ mod tests {
             share: share.to_string(),
             is_share_fixed,
             share_percentage: None,
+            share_weight: None,
         }
     }
 
@@ -176,6 +177,7 @@ mod tests {
                     "share": beneficiary.share,
                     "is_share_fixed": beneficiary.is_share_fixed,
                     "share_percentage": beneficiary.share_percentage,
+                    "share_weight": beneficiary.share_weight,
                 })
             })
             .collect();
@@ -238,9 +240,8 @@ mod tests {
                     user_uuid: text(beneficiary, "user_uuid"),
                     share: text(beneficiary, "share"),
                     is_share_fixed: beneficiary["is_share_fixed"].as_bool().unwrap(),
-                    share_percentage: beneficiary["share_percentage"]
-                        .as_str()
-                        .map(str::to_string),
+                    share_percentage: beneficiary["share_percentage"].as_str().map(str::to_string),
+                    share_weight: beneficiary["share_weight"].as_str().map(str::to_string),
                 })
                 .collect(),
             is_settlement: content["is_settlement"].as_bool().unwrap(),
@@ -421,6 +422,9 @@ mod tests {
             }),
             ("their percentage added", |b| {
                 b.share_percentage = Some("50".to_string())
+            }),
+            ("their weight added", |b| {
+                b.share_weight = Some("2".to_string())
             }),
         ];
 

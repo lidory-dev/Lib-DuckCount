@@ -153,8 +153,15 @@ impl Group {
     /// fixed_shares.insert(alice_uuid.clone(), String::from("100.00"));
     ///
     /// let beneficiaries =
-    ///     compute_beneficiaries(amount, &currency, &beneficiary_uuids, &fixed_shares, &HashMap::new())
-    ///         .unwrap();
+    ///     compute_beneficiaries(
+    ///         amount,
+    ///         &currency,
+    ///         &beneficiary_uuids,
+    ///         &fixed_shares,
+    ///         &HashMap::new(),
+    ///         &HashMap::new(),
+    ///     )
+    ///     .unwrap();
     ///
     /// let expense = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
     /// group.with_added_expense(Arc::new(expense));
@@ -376,8 +383,15 @@ impl Group {
     /// let beneficiary_uuids = vec![alice_uuid.clone()];
     ///
     /// let beneficiaries =
-    ///     compute_beneficiaries(amount, &currency, &beneficiary_uuids, &HashMap::new(), &HashMap::new())
-    ///         .unwrap();
+    ///     compute_beneficiaries(
+    ///         amount,
+    ///         &currency,
+    ///         &beneficiary_uuids,
+    ///         &HashMap::new(),
+    ///         &HashMap::new(),
+    ///         &HashMap::new(),
+    ///     )
+    ///     .unwrap();
     ///
     /// let expense = Expense::new(&creditor_uuid, amount, &currency, &beneficiaries).unwrap();
     ///

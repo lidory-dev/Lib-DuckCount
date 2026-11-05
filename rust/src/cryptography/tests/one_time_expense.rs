@@ -53,6 +53,7 @@ mod tests {
             share: sealed(&format!("{user_uuid} share")),
             is_share_fixed: sealed(&format!("{user_uuid} is_share_fixed")),
             share_percentage: sealed(&format!("{user_uuid} share_percentage")),
+            share_weight: sealed(&format!("{user_uuid} share_weight")),
         }
     }
 
@@ -115,6 +116,9 @@ mod tests {
             }),
             ("a share's percentage", |m| {
                 m.beneficiaries[0].share_percentage = sealed("other")
+            }),
+            ("a share's weight", |m| {
+                m.beneficiaries[0].share_weight = sealed("other")
             }),
             ("two shares swapped", |m| {
                 let first = m.beneficiaries[0].share.clone();
