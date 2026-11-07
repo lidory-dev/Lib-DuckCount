@@ -37,8 +37,13 @@ mod tests {
     /// `welcome_message`, on `POST /groups` and `POST /groups/{uuid}/members`.
     const MAX_WELCOME_LENGTH: usize = 512 * 1024;
 
-    /// `commit_message`, on `POST` and `DELETE /groups/{uuid}/members`.
+    /// `commit_message`, on `POST` and `DELETE /groups/{uuid}/members`, and on
+    /// `POST /groups/{uuid}/commits/rejoin`.
     const MAX_COMMIT_LENGTH: usize = 640 * 1024;
+
+    /// `group_info`, on `PUT /groups/{uuid}/group-info`: as long as a Welcome
+    /// may be, which carries the same tree.
+    const MAX_GROUP_INFO_LENGTH: usize = 512 * 1024;
 
     /// `profile_keys_message`, `key_message` and a group post's `ciphertext`.
     const MAX_GROUP_APPLICATION_MESSAGE_LENGTH: usize = 32 * 1024;
@@ -208,9 +213,11 @@ mod tests {
                 .chain(invitees.iter().map(|invitee| invitee.user_uuid.clone()))
                 .collect::<Vec<_>>();
 
+            let group_uuid = Uuid::new_v4().to_string();
+
             let creation = creator
                 .create_group(
-                    Some(Uuid::new_v4().to_string()),
+                    Some(group_uuid.clone()),
                     invitees,
                     Some(welcome_payload(&members)),
                 )
@@ -233,6 +240,42 @@ mod tests {
             assert!(
                 posted <= MAX_GROUP_APPLICATION_MESSAGE_LENGTH,
                 "profile keys message: {posted}"
+            );
+
+            // The GroupInfo a member of a hundred exports for another to
+            // rejoin from, the whole tree in it, and the Commit the other
+            // rejoins with, which encrypts the path to every member: the
+            // creator's own, back on a device a log-out emptied.
+            let group_info = full.rejoin_group_info().unwrap();
+
+            let exported = wire_length(&group_info);
+            assert!(
+                exported <= MAX_GROUP_INFO_LENGTH,
+                "GroupInfo of a hundred: {exported}"
+            );
+
+            let signed_back_in = MlsClient::restore(
+                creator_uuid.clone(),
+                SECRET.to_vec(),
+                Arc::new(MemoryStore::default()),
+                creator.signature_private_key(),
+                creator.signature_public_key(),
+            )
+            .unwrap();
+
+            let rejoin = signed_back_in
+                .rejoin_group(
+                    group_info,
+                    group_uuid,
+                    full.epoch().unwrap(),
+                    members[1..].to_vec(),
+                )
+                .unwrap();
+
+            let rejoin_commit = wire_length(&rejoin.commit);
+            assert!(
+                rejoin_commit <= MAX_COMMIT_LENGTH,
+                "rejoin of one of a hundred: {rejoin_commit}"
             );
 
             // Removing one of a hundred, which encrypts the path to every

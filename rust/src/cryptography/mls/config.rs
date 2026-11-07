@@ -19,7 +19,7 @@ use mls_rs::client_builder::{
 use mls_rs::group::{GroupContext, Member, Roster};
 use mls_rs::identity::SigningIdentity;
 use mls_rs::mls_rules::{
-    CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle,
+    CommitDirection, CommitOptions, CommitSource, EncryptionOptions, ProposalBundle, ProposalSource,
 };
 use mls_rs::{Client, CryptoProvider, MlsRules};
 use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
@@ -101,7 +101,16 @@ pub fn mls_rules() -> DuckCountMlsRules {
         // small, and buys post-compromise security on every commit rather than
         // only on those that happen to include a path.
         .with_path_required(true)
-        // Nobody joins a DuckCount group without an invitation.
+        // Whether a Commit's output carries a GroupInfo of the epoch it makes,
+        // signed and ready for somebody outside the group to commit
+        // themselves in from: mls-rs reads it as it builds a Commit, and
+        // nowhere else, receiving one included. It has no say in who may
+        // join: what a member takes from outside the group is a resync of a
+        // member's own leaf and nothing else, see `allows_rejoin`, and the
+        // GroupInfo it is built from is one a member exports on request, see
+        // `MlsGroup::rejoin_group_info`. Every Commit carrying one besides
+        // would double what the creator uploads with each, for the rare
+        // member who comes back after a log-out.
         .with_allow_external_commit(false);
 
     let encryption_options = EncryptionOptions::new(
@@ -131,8 +140,9 @@ impl MlsRules for DuckCountMlsRules {
     type Error = MlsError;
 
     /// Refuses a received Commit the commit policy the host named, if any,
-    /// does not allow, see `allows`, and lets every other Commit through as
-    /// it is, as mls-rs's own rules do.
+    /// does not allow, see `allows`, and lets every other Commit a member
+    /// sends from within the group through as it is, as mls-rs's own rules
+    /// do.
     ///
     /// mls-rs asks this once it has authenticated the Commit, and before it
     /// checks anything the Commit carries: the identity of each member it
@@ -145,6 +155,30 @@ impl MlsRules for DuckCountMlsRules {
     /// A Commit the policy takes from a member other than the creator has
     /// the leaf its update path carries held to theirs from then on, see
     /// `check_member_committer_leaf`.
+    ///
+    /// A Commit from outside the group, an external commit, is taken only
+    /// where a policy is held, and only as the resync of a member's own leaf,
+    /// see `allows_rejoin`: the one a member who lost their state to a
+    /// log-out comes back with. Anything else from outside the group is
+    /// refused alike, a new member seating themselves, a member's leaf taken
+    /// by somebody else, or by the member under another signature key, as an
+    /// unauthorized change. mls-rs asks this before it checks the leaf the
+    /// Commit seats against the key pinned for whoever it names, so a forged
+    /// one is refused that way by every member, and never as an
+    /// `IdentityKeyMismatch` by those who pinned somebody's key, which would
+    /// tell of a key that member never changed. The leaf it seats is then
+    /// held to the one it removes, as a member's own Commit is held to theirs.
+    ///
+    /// What mls-rs checks of an external commit before it asks this is
+    /// refused otherwise, with an error naming nobody: its epoch and group,
+    /// its signature, which is under the key the leaf it seats holds, and
+    /// any proposal of a type some member does not support, as every custom
+    /// one is, no DuckCount leaf supporting any.
+    ///
+    /// Without a policy, nothing from outside the group is taken: no
+    /// PublicMessage gets this far there, see
+    /// `MlsGroup::process_incoming_message`, and were one to, it would be
+    /// refused here.
     fn filter_proposals(
         &self,
         direction: CommitDirection,
@@ -154,7 +188,8 @@ impl MlsRules for DuckCountMlsRules {
         proposals: ProposalBundle,
     ) -> Result<ProposalBundle, MlsError> {
         // A Commit from outside the group comes as a PublicMessage, which
-        // `MlsGroup::process_incoming_message` refuses before mls-rs reads it.
+        // `MlsGroup::process_incoming_message` lets through only where a policy
+        // is held, and only as such a Commit.
         if direction == CommitDirection::Receive
             && let CommitSource::ExistingMember(committer) = &source
         {
@@ -178,6 +213,22 @@ impl MlsRules for DuckCountMlsRules {
             })?;
 
             MEMBER_COMMITTER.set(member_committer);
+        }
+
+        if direction == CommitDirection::Receive
+            && let CommitSource::NewMember(committer) = &source
+        {
+            let rejoined = COMMIT_POLICY.with_borrow(|policy| {
+                policy
+                    .as_ref()
+                    .and_then(|policy| allows_rejoin(policy, committer, current_roster, &proposals))
+            });
+
+            let Some(rejoined) = rejoined else {
+                return Err(MlsError::UnauthorizedChange);
+            };
+
+            MEMBER_COMMITTER.set(Some(rejoined));
         }
 
         Ok(proposals)
@@ -271,10 +322,87 @@ fn allows(
     Ok(removed.is_some_and(|removed| removed == departed))
 }
 
+/// The member `committer`, who commits from outside a group whose members are
+/// `roster`, as they were before the Commit, comes back as, if `policy` lets
+/// them commit `proposals`: `None` if it does not.
+///
+/// A log-out takes with it everything a device held of its groups, its MLS
+/// state included, and the only way back into a group is from outside it:
+/// RFC 9420's resync, an external commit removing the leaf the member had and
+/// seating a new one. That is what this takes, from any member, and nothing
+/// else from anybody: an `ExternalInit` and a `Remove`, both carried by value,
+/// and no other proposal, the leaf it removes naming the user `committer`
+/// names, and holding the signature key `committer` holds. A user has one
+/// signature key, the same in every group, which the host restores from the
+/// vault as it signs back in, so the leaf a resync seats is the one the user
+/// had, but for the key their device decrypts with. Membership changes in
+/// nothing, and every key the tree holds is still one its creator seated.
+///
+/// A member needs nobody's word for coming back: their signature key is
+/// theirs alone, and an external commit is signed with the one it seats. Who
+/// else could commit from outside the group is somebody holding a GroupInfo
+/// allowing it, which a member exports, see
+/// [`MlsGroup::rejoin_group_info`](crate::cryptography::mls::group::MlsGroup::rejoin_group_info),
+/// for the server to hand on: the server, then, which this keeps from seating
+/// anybody, and from taking a member's leaf under another key, the one way it
+/// could have read what the group writes.
+///
+/// It is refused where the server stored it with departed members, which no
+/// resync removes: the server names them only with a removal of the departed
+/// committed by a member, see `allows`.
+///
+/// Each user holds one leaf, so the leaf removed is the committer's own and
+/// nobody else's. The one it seats goes into the leftmost leaf nobody holds,
+/// which can be another than the one it removes: whoever reads the members
+/// goes by their user UUIDs, never by where they sit.
+fn allows_rejoin(
+    policy: &CommitPolicy,
+    committer: &SigningIdentity,
+    roster: &Roster,
+    proposals: &ProposalBundle,
+) -> Option<MemberCommitter> {
+    if !policy.departed_uuids.is_empty() || proposals.length() != 2 {
+        return None;
+    }
+
+    let ([external_init], [removal]) = (
+        proposals.external_init_proposals(),
+        proposals.remove_proposals(),
+    ) else {
+        return None;
+    };
+
+    if external_init.source != ProposalSource::ByValue || removal.source != ProposalSource::ByValue
+    {
+        return None;
+    }
+
+    // A leaf nobody holds, or a credential naming nobody, is nobody's to come
+    // back to: refused here, it is refused as anything else from outside the
+    // group is.
+    let removed = roster
+        .member_with_index(removal.proposal.to_remove())
+        .ok()?;
+
+    let user_uuid = user_uuid_from(&committer.credential).ok()?;
+
+    (user_uuid_from(&removed.signing_identity.credential).ok()? == user_uuid
+        && removed.signing_identity.signature_key == committer.signature_key)
+        .then(|| MemberCommitter {
+            user_uuid,
+            signature_key: committer.signature_key.clone(),
+        })
+}
+
 /// Refuses the leaf naming `user_uuid` with `signature_key`, one a Commit
 /// being received carries, if the commit policy took the Commit from a member
-/// other than the creator, see `allows`, and the leaf is not the one they
+/// other than the creator, see `allows`, or from any member coming back from
+/// outside the group, see `allows_rejoin`, and the leaf is not the one they
 /// had: it has to name them, and hold the signature key their leaf held.
+///
+/// A resync's leaf is the one mls-rs checked `allows_rejoin` against, so it
+/// passes here by then: this keeps any other leaf the Commit might have
+/// mls-rs check to the same, should it ever check one.
 ///
 /// Such a Commit seats nobody, so the one leaf it carries is the one its
 /// update path gives its committer. A user has one signature key, the same in
@@ -309,8 +437,10 @@ pub(crate) fn check_member_committer_leaf(
     })
 }
 
-/// A member other than the creator whose Commit the commit policy took, as
-/// their leaf named them before it, see [`check_member_committer_leaf`].
+/// A member whose Commit the commit policy took, as their leaf named them
+/// before it: a member other than the creator committing from within the
+/// group, or any member coming back from outside it, see
+/// [`check_member_committer_leaf`].
 struct MemberCommitter {
     user_uuid: String,
     signature_key: SignaturePublicKey,
@@ -321,8 +451,9 @@ thread_local! {
     /// holds to, if the host named one, see [`with_commit_policy`].
     static COMMIT_POLICY: RefCell<Option<CommitPolicy>> = const { RefCell::new(None) };
 
-    /// The member other than the creator whose Commit the policy took, while
-    /// that message is processed, see [`check_member_committer_leaf`].
+    /// The member whose Commit the policy took, but for the creator
+    /// committing from within the group, while that message is processed,
+    /// see [`check_member_committer_leaf`].
     static MEMBER_COMMITTER: RefCell<Option<MemberCommitter>> = const { RefCell::new(None) };
 }
 

@@ -17,6 +17,14 @@
 //! is still true, and the host resolves it the same way once it knows the
 //! request's fate.
 //!
+//! The one Commit that is not left pending is a rejoin, see
+//! [`MlsClient::rejoin_group`](crate::cryptography::mls::client::MlsClient::rejoin_group):
+//! mls-rs builds a Commit from outside the group already applied, and the
+//! group it stores is in the epoch the Commit makes. It holds nothing of the
+//! epoch before, which this device never held, so there is nothing to go back
+//! to: refused, the group is deleted, and rejoined again from a GroupInfo of
+//! the epoch the server is in.
+//!
 //! # Concurrent commits
 //!
 //! MLS allows exactly one Commit per epoch. Two members committing at once
@@ -51,23 +59,28 @@
 //! has to be reissued.
 //!
 //! In a group the DuckCount API holds, its creator commits whatever they
-//! change, and any other member only the removal of members who have
-//! departed, which is how a member who left is cut off while the creator's
-//! phone is offline. Such a removal has to remove exactly the members the
-//! server stored it with, who it checked had departed: the host passes their
-//! list with each message, and every member decides on it alike, see
-//! [`CommitPolicy`]. Every member refuses any other Commit, see
+//! change, and any other member only the removal of members who have departed,
+//! which is how a member who left is cut off while the creator's phone is
+//! offline, and, from outside the group, the resync of their own leaf that
+//! brings them back after a log-out, which changes nobody. Such a removal has
+//! to remove exactly the members the server stored it with, who it checked had
+//! departed: the host passes their list with each message, and every member
+//! decides on it alike, see [`CommitPolicy`]. Every member refuses any other
+//! Commit, see
 //! [`process_incoming_message`](MlsGroup::process_incoming_message). A refused
 //! Commit applies nothing and clears nothing, a Commit of this user's still
-//! pending included. What can compete, then, is a Commit of the creator's and
-//! another member's removal of somebody who departed, or two such removals:
-//! the one the server stored is the one every member applies, a Commit of
-//! their own still pending cleared as they apply it.
+//! pending included. What can compete, then, is any two of these: a Commit of
+//! the creator's, a member's removal of somebody who departed, and a member's
+//! rejoin. The one the server stored is the one every member applies, a Commit
+//! of their own still pending cleared as they apply it, and a rejoin that lost
+//! is deleted and made again, see above.
 
 use std::sync::{Mutex, MutexGuard};
 
 use mls_rs::group::proposal::Proposal;
-use mls_rs::group::{ApplicationMessageDescription, CommitEffect, ContentType, ReceivedMessage};
+use mls_rs::group::{
+    ApplicationMessageDescription, CommitEffect, ContentType, ReceivedMessage, Sender,
+};
 use mls_rs::{Group, MlsMessage, MlsMessageDescription, WireFormat};
 use mls_rs_core::crypto::SignaturePublicKey;
 
@@ -268,12 +281,15 @@ impl MlsGroup {
     /// checked against that pin, see [`MlsClient::join_group`], so the tree it
     /// opens is the creator's word. Every member seated since was seated by a
     /// Commit of theirs: its members refuse every Proposal, and any other
-    /// member's Commit but one removing members who have departed, see
+    /// member's Commit but one removing members who have departed, or a
+    /// member's resync of their own leaf, see
     /// [`process_incoming_message`](Self::process_incoming_message). Such a
     /// removal seats nobody, and the update path it carries is its
     /// committer's own, held to the key their leaf already had, see
-    /// `check_member_committer_leaf` in `config.rs`, so every key in the tree is
-    /// still one the creator seated. And the creator's host seats only
+    /// `check_member_committer_leaf` in `config.rs`, and a resync seats the
+    /// member it removes again, under the key their leaf held, see
+    /// `allows_rejoin` there, so every key in the tree is still one the
+    /// creator seated. And the creator's host seats only
     /// contacts it has pinned, each checked against that pin as
     /// [`MlsClient::create_group`] or [`add_members`](Self::add_members) adds
     /// them. Both pin anybody not pinned yet from whichever key package the
@@ -368,6 +384,48 @@ impl MlsGroup {
     /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
     pub fn has_pending_commit(&self) -> Result<bool, MlsError> {
         Ok(self.locked()?.has_pending_commit())
+    }
+
+    /// The GroupInfo of the epoch the group is in, for a member who lost their
+    /// state to rejoin the group from, see
+    /// [`MlsClient::rejoin_group`].
+    ///
+    /// It describes the group as this member holds it, signed by them: its
+    /// context, the ratchet tree, which the DuckCount API does not store, and
+    /// the public key an external commit is built with, from which a Commit
+    /// from outside the group can be made for this epoch, and for no other.
+    /// Its context holds no extension, and it carries nothing of what the
+    /// group writes: the server it goes through, unsealed, learns the
+    /// members' user UUIDs and public keys from it, and nothing it could read
+    /// the group with. Nobody else can come in with it either, whoever hands
+    /// it on: members take nothing from outside the group but a member's
+    /// resync of their own leaf, which only whoever holds that member's
+    /// signature key can sign, see
+    /// [`process_incoming_message`](Self::process_incoming_message).
+    ///
+    /// A Commit of this user's pending changes nothing of it: it is of the
+    /// epoch the group is in until the Commit is applied. Once a Commit is
+    /// applied, from anybody, the GroupInfo describes an epoch that ended, and
+    /// a Commit built from it is refused by every member.
+    ///
+    /// [`MlsClient::rejoin_group`]: crate::cryptography::mls::client::MlsClient::rejoin_group
+    ///
+    /// # Returns
+    ///
+    /// * `Result<Vec<u8>, MlsError>` - The serialised GroupInfo message.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If the GroupInfo cannot be built or
+    ///   signed.
+    pub fn rejoin_group_info(&self) -> Result<Vec<u8>, MlsError> {
+        let group = self.locked()?;
+
+        group
+            .group_info_message_allowing_ext_commit(true)?
+            .to_bytes()
+            .map_err(Into::into)
     }
 
     /// Adds members to the group.
@@ -677,6 +735,22 @@ impl MlsGroup {
     /// remove them, which is no more than the server can do already, since
     /// whatever reaches a member is the server's to deliver.
     ///
+    /// A Commit from outside the group is taken where `policy` is given, and
+    /// only as a member's resync of their own leaf: the Commit a member whose
+    /// state a log-out took rejoins the group with, see
+    /// [`MlsClient::rejoin_group`], which removes the leaf they had and seats
+    /// one naming them under the signature key it held, and changes nothing
+    /// else. Any member may rejoin so, the creator as anybody else, and the
+    /// group holds the same members once it is applied. Anything else from
+    /// outside the group is refused as a Commit the policy does not allow: a
+    /// new member seating themselves, which is how the server, or anybody
+    /// else holding a GroupInfo a member exported, would have read what the
+    /// group writes, and a member's leaf taken by somebody else, or under
+    /// another key. So is a resync the server stored with departed members.
+    /// Without a policy, nothing from outside the group is taken.
+    ///
+    /// [`MlsClient::rejoin_group`]: crate::cryptography::mls::client::MlsClient::rejoin_group
+    ///
     /// A Proposal is of no use to the creator, who commits what they change
     /// themselves: kept, it would stop the group sending until somebody
     /// committed it, and be committed along with the creator's next change,
@@ -726,9 +800,11 @@ impl MlsGroup {
     /// * `MlsError::UnauthorizedChange` - If `policy` is given and the message
     ///   is a Commit it does not allow, one from a member other than the
     ///   creator whose update path does not keep the leaf they had included,
-    ///   or a Proposal. Nothing is stored.
+    ///   a Commit from outside the group other than a member's resync of
+    ///   their own leaf, or a Proposal. Nothing is stored.
     /// * `MlsError::InvalidMessage` - If the message cannot be parsed, or was not
-    ///   encrypted to the group.
+    ///   encrypted to the group, and is not a Commit from outside it where
+    ///   `policy` is given.
     /// * `MlsError::GroupStateTooLarge` - If what the message did would grow
     ///   the group past the most a group may store. While a Commit of this
     ///   user's is pending, this can be for the room the Commit takes, and the
@@ -742,7 +818,10 @@ impl MlsGroup {
     ///   for an epoch too old to still be retained, or fails authentication,
     ///   or if it is a Commit whose committer's update path holds a signature
     ///   key other than the one their leaf had, from the creator if `policy`
-    ///   is given, and no key is pinned for them.
+    ///   is given, and no key is pinned for them, or a Commit from outside
+    ///   the group for an epoch other than the one it is in, as a second one
+    ///   built from the GroupInfo another was is, or carrying a proposal of a
+    ///   type some member does not support, as any custom one is.
     /// * `MlsError::StorageFailed` - If the resulting state cannot be stored.
     pub fn process_incoming_message(
         &self,
@@ -757,7 +836,26 @@ impl MlsGroup {
         // proposal from a would-be member, signed by nothing but the key package it
         // carries and needing only the group id and epoch, which travel in the clear.
         // Kept pending, it would stop the group sending anything until committed.
-        if message.wire_format() != WireFormat::PrivateMessage {
+        //
+        // But for a Commit from outside the group, which RFC 9420 has travel as a
+        // PublicMessage: a member coming back after a log-out took their state
+        // rejoins with one, see `MlsClient::rejoin_group`. It is let through where a
+        // policy is held alone, a group the DuckCount API holds, and the policy then
+        // takes nothing from outside the group but a member's resync of their own
+        // leaf, see `allows_rejoin` in config.rs. A channel or a contact request,
+        // whose members never change, takes none.
+        let is_external_commit = matches!(
+            message.description(),
+            MlsMessageDescription::PublicProtocolMessage {
+                content_type: ContentType::Commit,
+                sender: Sender::NewMemberCommit,
+                ..
+            }
+        );
+
+        if message.wire_format() != WireFormat::PrivateMessage
+            && !(policy.is_some() && is_external_commit)
+        {
             return Err(MlsError::InvalidMessage);
         }
 
@@ -781,7 +879,9 @@ impl MlsGroup {
                     // it was sent from, which is still the committer's: mls-rs
                     // refuses a Commit removing its own committer, and lets a
                     // member's leaf pass to nobody else, see `valid_successor`
-                    // in `pinning_provider.rs`.
+                    // in `pinning_provider.rs`. A member rejoining from outside
+                    // the group is read from the leaf they took, which mls-rs
+                    // names as the one the Commit was sent from.
                     committer_user_uuid: Self::member_uuid(group, description.committer),
                     epoch: group.current_epoch(),
                     removed_self: matches!(description.effect, CommitEffect::Removed { .. }),

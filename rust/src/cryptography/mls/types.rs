@@ -46,6 +46,26 @@ pub struct AddMembersOutput {
     pub welcome: Vec<u8>,
 }
 
+/// The result of rejoining a group from outside it, see
+/// [`MlsClient::rejoin_group`].
+///
+/// [`MlsClient::rejoin_group`]: crate::cryptography::mls::client::MlsClient::rejoin_group
+#[derive(uniffi::Record, Debug)]
+pub struct GroupRejoin {
+    /// Identifier of the group rejoined, the one derived for the UUID the
+    /// DuckCount API holds it under, see
+    /// [`group_id`](crate::cryptography::mls::group_id), as it was before.
+    pub mls_group_id: Vec<u8>,
+    /// The external commit removing the leaf this user had and seating the
+    /// one this device holds, for every member of the group. It is a
+    /// PublicMessage, as every Commit from outside a group is.
+    pub commit: Vec<u8>,
+    /// The epoch the Commit takes the group to, one past the one the
+    /// GroupInfo it was built from is for: the one this device's state is in
+    /// already.
+    pub epoch: u64,
+}
+
 /// What a Welcome says, read without joining the group it is for, see
 /// [`MlsClient::inspect_welcome`].
 ///
@@ -119,7 +139,10 @@ pub struct CommitPolicy {
     /// it, and nobody for any other message. Any other member's Commit is
     /// applied only if it removes exactly these members, all of them and
     /// nobody else; the order they are named in does not matter, nor a member
-    /// named twice.
+    /// named twice. A member's resync of their own leaf, the Commit from
+    /// outside the group they rejoin with after a log-out, is applied only if
+    /// this names nobody, as it does for the Commit
+    /// `POST /groups/{uuid}/commits/rejoin` stores.
     ///
     /// It is the server's list for that one message, never this device's own
     /// view of who has departed, so that every member decides alike about
@@ -152,7 +175,9 @@ pub enum ProcessedMessage {
         ///
         /// Never absent in practice: mls-rs refuses a Commit removing its own
         /// committer, so they are still in the group once it is applied, and
-        /// every member's credential was checked as they entered it.
+        /// every member's credential was checked as they entered it. A member
+        /// rejoining from outside the group removes the leaf they had and is
+        /// read from the one they took, which names them too.
         committer_user_uuid: Option<String>,
         /// The epoch the group is now in. For the local user removed by this
         /// Commit, the epoch it was in before: mls-rs does not take a removed

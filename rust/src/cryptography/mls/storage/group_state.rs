@@ -385,15 +385,36 @@ impl SealedGroupStateStorage {
             )
             .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
 
+        self.delete_epochs(group_id)?;
+
+        self.store
+            .delete(MlsNamespace::GroupState, group_id.to_vec())
+            .map_err(|error| MlsError::StorageFailed(error.to_string()))
+    }
+
+    /// Deletes the record of every epoch of a group, whether or not a state
+    /// is stored for it.
+    ///
+    /// A write cut short between the epochs it writes first and the state it
+    /// writes last, see [`write`](GroupStateStorage::write), leaves records of
+    /// epochs no state refers to. mls-rs takes the latest epoch stored for a
+    /// group's id as the one before the next it is to store, so a group put
+    /// under that id afresh at another epoch, as a rejoin puts one, could not
+    /// be stored beside them, see
+    /// [`MlsClient::rejoin_group`](crate::cryptography::mls::client::MlsClient::rejoin_group).
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails. The records
+    ///   deleted before it did stay deleted.
+    pub fn delete_epochs(&self, group_id: &[u8]) -> Result<(), MlsError> {
         for key in self.epoch_keys(group_id)? {
             self.store
                 .delete(MlsNamespace::GroupEpoch, key)
                 .map_err(|error| MlsError::StorageFailed(error.to_string()))?;
         }
 
-        self.store
-            .delete(MlsNamespace::GroupState, group_id.to_vec())
-            .map_err(|error| MlsError::StorageFailed(error.to_string()))
+        Ok(())
     }
 
     /// Forgets the deleted groups whose Welcome no key package left can open,

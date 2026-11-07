@@ -4,19 +4,24 @@ mod tests {
     use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
 
-    use mls_rs::client_builder::MlsConfig;
+    use mls_rs::client_builder::{MlsConfig, PaddingMode};
     use mls_rs::extension::MlsExtension;
+    use mls_rs::extension::built_in::RatchetTreeExt;
     use mls_rs::extension::recommended::LastResortKeyPackageExt;
     use mls_rs::group::ContentType;
-    use mls_rs::identity::SigningIdentity;
     use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
+    use mls_rs::identity::{CredentialType, SigningIdentity};
+    use mls_rs::mls_rules::{DefaultMlsRules, EncryptionOptions};
+    use mls_rs::psk::{ExternalPskId, PreSharedKey};
     use mls_rs::storage_provider::in_memory::InMemoryGroupStateStorage;
     use mls_rs::time::MlsTime;
     use mls_rs::{
         CipherSuite, CipherSuiteProvider, Client, CryptoProvider, Extension, ExtensionList, Group,
-        MlsMessage,
+        IdentityProvider, MlsMessage, WireFormat,
     };
+    use mls_rs_core::crypto::{SignaturePublicKey, SignatureSecretKey};
     use mls_rs_core::group::{EpochRecord, GroupState, GroupStateStorage};
+    use mls_rs_core::identity::MemberValidationContext;
     use mls_rs_crypto_awslc::AwsLcCryptoProvider;
     use uuid::Uuid;
     use zeroize::Zeroizing;
@@ -41,7 +46,9 @@ mod tests {
         max_group_state_len_in_tests, with_limits_outside_tests,
     };
     use crate::cryptography::mls::storage::{MlsNamespace, MlsStore, MlsStoreError};
-    use crate::cryptography::mls::types::{CommitPolicy, InviteeKeyPackage, ProcessedMessage};
+    use crate::cryptography::mls::types::{
+        CommitPolicy, GroupRejoin, InviteeKeyPackage, ProcessedMessage,
+    };
     use crate::cryptography::mls::{CIPHER_SUITE, MAX_GROUP_MEMBERS, MlsError, max_group_members};
 
     const SECRET: &[u8] = b"&eHml-C_AFyWdylXLd50";
@@ -2509,11 +2516,15 @@ mod tests {
             )
             .unwrap();
 
-        let error = groups[1]
-            .process_incoming_message(proposal.to_bytes().unwrap(), None)
-            .expect_err("a message sent in the clear must be refused");
+        // Where a policy is held too, which takes a Commit from outside the group,
+        // a member's resync, and nothing else from there.
+        for policy in [None, created_by(&alice)] {
+            let error = groups[1]
+                .process_incoming_message(proposal.to_bytes().unwrap(), policy)
+                .expect_err("a message sent in the clear must be refused");
 
-        assert!(matches!(error, MlsError::InvalidMessage));
+            assert!(matches!(error, MlsError::InvalidMessage));
+        }
 
         let error = groups[1]
             .read_application_message(proposal.to_bytes().unwrap())
@@ -2825,6 +2836,20 @@ mod tests {
         member_count: usize,
         joiner: &TestUser,
     ) -> (Vec<u8>, String, Vec<String>) {
+        let (_, welcome, group_uuid, others) = group_of(member_count, joiner);
+
+        (welcome, group_uuid, others)
+    }
+
+    /// A group of `member_count` members, which an [`MlsClient`] refuses to
+    /// write past the cap, as its creator, a [`plain_client`], holds it with
+    /// the Commit adding everybody else still pending, the Welcome that Commit
+    /// sends `joiner`, the UUID the API holds the group under, and the UUIDs of
+    /// everybody in it but `joiner`, the creator's first.
+    fn group_of(
+        member_count: usize,
+        joiner: &TestUser,
+    ) -> (Group<impl MlsConfig>, Vec<u8>, String, Vec<String>) {
         let creator_uuid = Uuid::new_v4().to_string();
         let group_uuid = new_group_uuid();
 
@@ -2854,7 +2879,7 @@ mod tests {
             .chain(strangers.into_iter().map(|stranger| stranger.user_uuid))
             .collect();
 
-        (welcome.to_bytes().unwrap(), group_uuid, others)
+        (group, welcome.to_bytes().unwrap(), group_uuid, others)
     }
 
     #[test]
@@ -5401,6 +5426,1208 @@ mod tests {
                 .unwrap_err(),
             MlsError::GroupAlreadyJoined
         ));
+    }
+
+    /// `user` on a device a log-out emptied, as the host opens it on signing
+    /// back in: their signature key restored from the vault, and the pins the
+    /// host kept put back, one for each of `pinned`. It holds no group.
+    fn signed_back_in(user: &TestUser, pinned: &[&TestUser]) -> TestUser {
+        let store = TestStore::new();
+
+        let client = MlsClient::restore(
+            user.uuid.clone(),
+            SECRET.to_vec(),
+            store.clone(),
+            user.client.signature_private_key(),
+            user.client.signature_public_key(),
+        )
+        .unwrap();
+
+        for peer in pinned {
+            client
+                .pin_identity(peer.uuid.clone(), peer.client.signature_public_key())
+                .unwrap();
+        }
+
+        TestUser {
+            uuid: user.uuid.clone(),
+            store,
+            client,
+        }
+    }
+
+    /// `user`'s rejoin of the group the DuckCount API holds under
+    /// `group_uuid`, from the GroupInfo `member` exports, expecting the group
+    /// in the epoch `member` is in, holding `others` besides `user`.
+    fn rejoin_from(
+        user: &TestUser,
+        member: &MlsGroup,
+        group_uuid: &str,
+        others: &[&TestUser],
+    ) -> Result<GroupRejoin, MlsError> {
+        user.client.rejoin_group(
+            member.rejoin_group_info().unwrap(),
+            group_uuid.to_string(),
+            member.epoch().unwrap(),
+            uuids(others),
+        )
+    }
+
+    /// The signature key pair of `user`, as their vault holds it.
+    fn key_pair_of(user: &TestUser) -> (SignatureSecretKey, SignaturePublicKey) {
+        (
+            SignatureSecretKey::from(user.client.signature_private_key()),
+            SignaturePublicKey::new(user.client.signature_public_key()),
+        )
+    }
+
+    /// The index of the leaf `user_uuid` holds in the tree `group_info`
+    /// carries.
+    fn leaf_of(group_info: &MlsMessage, user_uuid: &str) -> u32 {
+        group_info
+            .as_group_info()
+            .unwrap()
+            .extensions()
+            .get_as::<RatchetTreeExt>()
+            .unwrap()
+            .unwrap()
+            .tree_data
+            .roster()
+            .members_iter()
+            .find(|member| {
+                member
+                    .signing_identity
+                    .credential
+                    .as_basic()
+                    .unwrap()
+                    .identifier
+                    == user_uuid.as_bytes()
+            })
+            .unwrap()
+            .index
+    }
+
+    /// The pre-shared key every [`outsider`] holds, which no member does.
+    const OUTSIDER_PSK_ID: &[u8] = b"outsider";
+
+    /// A plain mls-rs client committing to groups from outside them as
+    /// `user_uuid`, under `key_pair` or a signature key of its own, holding the
+    /// pre-shared key [`OUTSIDER_PSK_ID`] and taking any leaf for the
+    /// successor of any other: it leaves every check of a Commit from outside
+    /// a group to the members who receive it.
+    fn outsider(
+        user_uuid: &str,
+        key_pair: Option<(SignatureSecretKey, SignaturePublicKey)>,
+    ) -> Client<impl MlsConfig> {
+        let crypto_provider = crate::cryptography::mls::config::crypto_provider();
+
+        let (secret, public) = key_pair.unwrap_or_else(|| {
+            crypto_provider
+                .cipher_suite_provider(CIPHER_SUITE)
+                .unwrap()
+                .signature_key_generate()
+                .unwrap()
+        });
+
+        Client::builder()
+            .identity_provider(AnySuccessor)
+            .crypto_provider(crypto_provider)
+            .mls_rules(mls_rules())
+            .psk(
+                ExternalPskId::new(OUTSIDER_PSK_ID.to_vec()),
+                PreSharedKey::new(vec![7; 32]),
+            )
+            .signing_identity(
+                SigningIdentity::new(
+                    BasicCredential::new(user_uuid.as_bytes().to_vec()).into_credential(),
+                    public,
+                ),
+                secret,
+                CIPHER_SUITE,
+            )
+            .build()
+    }
+
+    /// An identity provider taking any basic credential, and any leaf for the
+    /// successor of any other, see [`outsider`].
+    ///
+    /// Each leaf is told apart by its signature key rather than the user its
+    /// credential names, so that a Commit seating a second leaf naming a
+    /// member can be built at all: refusing it is the receivers' to do.
+    #[derive(Clone)]
+    struct AnySuccessor;
+
+    impl IdentityProvider for AnySuccessor {
+        type Error = Infallible;
+
+        fn validate_member(
+            &self,
+            _signing_identity: &SigningIdentity,
+            _timestamp: Option<MlsTime>,
+            _context: MemberValidationContext<'_>,
+        ) -> Result<(), Infallible> {
+            Ok(())
+        }
+
+        fn validate_external_sender(
+            &self,
+            _signing_identity: &SigningIdentity,
+            _timestamp: Option<MlsTime>,
+            _extensions: Option<&ExtensionList>,
+        ) -> Result<(), Infallible> {
+            Ok(())
+        }
+
+        fn identity(
+            &self,
+            signing_identity: &SigningIdentity,
+            _extensions: &ExtensionList,
+        ) -> Result<Vec<u8>, Infallible> {
+            Ok(signing_identity.signature_key.to_vec())
+        }
+
+        fn valid_successor(
+            &self,
+            _predecessor: &SigningIdentity,
+            _successor: &SigningIdentity,
+            _extensions: &ExtensionList,
+        ) -> Result<bool, Infallible> {
+            Ok(true)
+        }
+
+        fn supported_types(&self) -> Vec<CredentialType> {
+            vec![CredentialType::BASIC]
+        }
+    }
+
+    #[test]
+    fn test_the_creator_signed_back_in_rejoins_the_group_and_every_member_follows() {
+        // Alice, the group's creator, logs out and signs back in: her device holds
+        // nothing of the group, only her signature key and the pins the host kept.
+        // She rejoins from the GroupInfo Bob exports, and the group goes on.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let dave = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (logged_out_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let epoch = bob_group.epoch().unwrap();
+        let alice_back = signed_back_in(&alice, &[&bob, &carol]);
+
+        let rejoin = rejoin_from(&alice_back, bob_group, &group_uuid, &[&bob, &carol]).unwrap();
+
+        assert_eq!(rejoin.mls_group_id, server_group_id(&group_uuid));
+        assert_eq!(rejoin.epoch, epoch + 1);
+
+        for group in [bob_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, epoch: now_in, removed_self: false }
+                    if committer_user_uuid == Some(alice.uuid.clone()) && now_in == epoch + 1
+            ));
+        }
+
+        // The state the log-out took, had it been kept, would read itself out of
+        // the group: the leaf it held is gone.
+        assert!(matches!(
+            logged_out_group
+                .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                .unwrap(),
+            ProcessedMessage::Commit {
+                removed_self: true,
+                ..
+            }
+        ));
+
+        // Applied as it was built: nothing is left pending.
+        let alice_group = alice_back.client.load_group(rejoin.mls_group_id).unwrap();
+
+        assert!(!alice_group.has_pending_commit().unwrap());
+
+        let mut expected = uuids(&[&alice, &bob, &carol]);
+        expected.sort();
+
+        let key = alice_group.content_key(group_uuid.clone()).unwrap();
+
+        for group in [&alice_group, bob_group, carol_group] {
+            assert_eq!(group.epoch().unwrap(), epoch + 1);
+            assert_eq!(group.content_key(group_uuid.clone()).unwrap(), key);
+            assert_eq!(member_uuids(group), expected);
+        }
+
+        // Back in, she adds Dave, and everybody follows.
+        let addition = alice_group
+            .add_members(vec![dave.invitation()], None)
+            .unwrap();
+
+        for group in [bob_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(addition.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit {
+                    removed_self: false,
+                    ..
+                }
+            ));
+        }
+
+        accept(&alice_group);
+
+        let dave_group_id = dave
+            .client
+            .join_group(
+                addition.welcome,
+                Some(group_uuid.clone()),
+                uuids(&[&alice, &bob, &carol]),
+                true,
+            )
+            .unwrap();
+        let dave_group = dave.client.load_group(dave_group_id).unwrap();
+
+        let key = alice_group.content_key(group_uuid.clone()).unwrap();
+
+        for group in [&alice_group, bob_group, carol_group, &dave_group] {
+            assert_eq!(group.epoch().unwrap(), epoch + 2);
+            assert_eq!(group.content_key(group_uuid.clone()).unwrap(), key);
+        }
+
+        let message = dave_group
+            .encrypt_application_message(b"hello".to_vec())
+            .unwrap();
+
+        for group in [&alice_group, bob_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(message.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::ApplicationMessage { sender_user_uuid, .. }
+                    if sender_user_uuid == dave.uuid
+            ));
+        }
+    }
+
+    #[test]
+    fn test_a_member_signed_back_in_rejoins_the_group_and_follows_the_creator() {
+        // Bob, a member, logs out and signs back in, and rejoins from the GroupInfo
+        // Alice, the creator, exports. The next Commit is hers, and he follows it.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let epoch = alice_group.epoch().unwrap();
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+
+        let rejoin = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        for group in [alice_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, removed_self: false, .. }
+                    if committer_user_uuid == Some(bob.uuid.clone())
+            ));
+        }
+
+        let bob_group = bob_back.client.load_group(rejoin.mls_group_id).unwrap();
+
+        let key = bob_group.content_key(group_uuid.clone()).unwrap();
+
+        for group in [alice_group, &bob_group, carol_group] {
+            assert_eq!(group.epoch().unwrap(), epoch + 1);
+            assert_eq!(group.content_key(group_uuid.clone()).unwrap(), key);
+        }
+
+        // Alice removes Carol, and Bob follows.
+        let removal = alice_group
+            .remove_members(vec![carol.uuid.clone()])
+            .unwrap();
+
+        for (group, removed) in [(&bob_group, false), (carol_group, true)] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(removal.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { removed_self, .. } if removed_self == removed
+            ));
+        }
+
+        accept(alice_group);
+
+        let mut expected = uuids(&[&alice, &bob]);
+        expected.sort();
+
+        let key = alice_group.content_key(group_uuid.clone()).unwrap();
+
+        for group in [alice_group, &bob_group] {
+            assert_eq!(group.epoch().unwrap(), epoch + 2);
+            assert_eq!(group.content_key(group_uuid.clone()).unwrap(), key);
+            assert_eq!(member_uuids(group), expected);
+        }
+
+        // His leaf holds the key Alice pinned for him, so what he writes reads as
+        // his as before.
+        let message = bob_group
+            .encrypt_application_message(b"back".to_vec())
+            .unwrap();
+
+        assert!(matches!(
+            alice_group
+                .process_incoming_message(message, created_by(&alice))
+                .unwrap(),
+            ProcessedMessage::ApplicationMessage { sender_user_uuid, is_sender_pinned: true, .. }
+                if sender_user_uuid == bob.uuid
+        ));
+    }
+
+    #[test]
+    fn test_members_refuse_every_commit_from_outside_the_group_but_a_members_resync() {
+        // Anybody holding a GroupInfo a member exported, the server above all, which
+        // hands it on, can commit from outside the group. Members take nothing of it
+        // but a member's resync of their own leaf, under the key it holds, and
+        // refuse the rest alike, before any of it is checked against a pin.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, bob_group) = (&groups[0], &groups[1]);
+
+        let group_info = MlsMessage::from_bytes(&alice_group.rejoin_group_info().unwrap()).unwrap();
+        let carol_leaf = leaf_of(&group_info, &carol.uuid);
+        let stranger_uuid = Uuid::new_v4().to_string();
+
+        let forged = [
+            (
+                "a stranger seating themselves",
+                outsider(&stranger_uuid, None)
+                    .external_commit_builder()
+                    .unwrap()
+                    .build(group_info.clone()),
+            ),
+            (
+                "a stranger taking Carol's leaf",
+                outsider(&stranger_uuid, None)
+                    .external_commit_builder()
+                    .unwrap()
+                    .with_removal(carol_leaf)
+                    .build(group_info.clone()),
+            ),
+            (
+                "a leaf naming Bob taking Carol's",
+                outsider(&bob.uuid, None)
+                    .external_commit_builder()
+                    .unwrap()
+                    .with_removal(carol_leaf)
+                    .build(group_info.clone()),
+            ),
+            // Bob has Carol's key pinned: left to the pins, this would be refused
+            // as a key of hers that changed.
+            (
+                "Carol's leaf under another key",
+                outsider(&carol.uuid, None)
+                    .external_commit_builder()
+                    .unwrap()
+                    .with_removal(carol_leaf)
+                    .build(group_info.clone()),
+            ),
+            (
+                "Carol's resync with a pre-shared key besides",
+                outsider(&carol.uuid, Some(key_pair_of(&carol)))
+                    .external_commit_builder()
+                    .unwrap()
+                    .with_removal(carol_leaf)
+                    .with_external_psk(ExternalPskId::new(OUTSIDER_PSK_ID.to_vec()))
+                    .build(group_info.clone()),
+            ),
+        ];
+
+        let before = bob.store.records();
+
+        for (what, built) in forged {
+            let (_, commit) = built.unwrap_or_else(|error| panic!("{what}: {error}"));
+
+            let error = bob_group
+                .process_incoming_message(commit.to_bytes().unwrap(), created_by(&alice))
+                .expect_err(what);
+
+            assert!(
+                matches!(error, MlsError::UnauthorizedChange),
+                "{what}: {error}"
+            );
+        }
+
+        // Carol's own resync, which the server stored with departed members: none
+        // of them is removed by it.
+        let carol_back = signed_back_in(&carol, &[&alice, &bob]);
+        let rejoin = rejoin_from(&carol_back, alice_group, &group_uuid, &[&alice, &bob]).unwrap();
+
+        let error = bob_group
+            .process_incoming_message(
+                rejoin.commit.clone(),
+                commit_policy(&alice.uuid, &[&carol.uuid]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, MlsError::UnauthorizedChange));
+        assert_eq!(bob.store.records(), before);
+
+        // Stored with none, it is taken.
+        assert!(matches!(
+            bob_group
+                .process_incoming_message(rejoin.commit, created_by(&alice))
+                .unwrap(),
+            ProcessedMessage::Commit { committer_user_uuid, .. }
+                if committer_user_uuid == Some(carol.uuid.clone())
+        ));
+
+        assert_eq!(
+            bob_group.content_key(group_uuid.clone()).unwrap(),
+            carol_back
+                .client
+                .load_group(rejoin.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_a_commit_from_outside_a_group_holding_to_no_policy_is_refused() {
+        // A channel's members never change: not even a peer's resync is taken, nor
+        // read as an application message.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let creation = alice
+            .client
+            .create_group(None, vec![bob.invitation()], None)
+            .unwrap();
+        let alice_group = alice.client.load_group(creation.mls_group_id).unwrap();
+
+        bob.client
+            .join_group(creation.welcome, None, uuids(&[&alice]), true)
+            .unwrap();
+
+        let group_info = MlsMessage::from_bytes(&alice_group.rejoin_group_info().unwrap()).unwrap();
+
+        let (_, resync) = outsider(&bob.uuid, Some(key_pair_of(&bob)))
+            .external_commit_builder()
+            .unwrap()
+            .with_removal(leaf_of(&group_info, &bob.uuid))
+            .build(group_info)
+            .unwrap();
+
+        let resync = resync.to_bytes().unwrap();
+        let before = alice.store.records();
+
+        assert!(matches!(
+            alice_group
+                .process_incoming_message(resync.clone(), None)
+                .unwrap_err(),
+            MlsError::InvalidMessage
+        ));
+        assert!(matches!(
+            alice_group.read_application_message(resync).unwrap_err(),
+            MlsError::InvalidMessage
+        ));
+
+        assert_eq!(alice.store.records(), before);
+    }
+
+    #[test]
+    fn test_a_members_commit_sent_in_the_clear_is_refused() {
+        // Mallory, a member, sends his Commits as PublicMessages, which no client of
+        // this library does. A Commit from within the group is refused in the clear,
+        // whether a policy is held or not: the one taken in the clear is a resync
+        // from outside it.
+        let bob = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let mallory_uuid = Uuid::new_v4().to_string();
+
+        let crypto_provider = crate::cryptography::mls::config::crypto_provider();
+        let cipher_suite_provider = crypto_provider.cipher_suite_provider(CIPHER_SUITE).unwrap();
+        let (secret, public) = cipher_suite_provider.signature_key_generate().unwrap();
+
+        let mallory = Client::builder()
+            .identity_provider(BasicIdentityProvider)
+            .crypto_provider(crypto_provider)
+            .mls_rules(
+                DefaultMlsRules::new()
+                    .with_encryption_options(EncryptionOptions::new(false, PaddingMode::None)),
+            )
+            .signing_identity(
+                SigningIdentity::new(
+                    BasicCredential::new(mallory_uuid.clone().into_bytes()).into_credential(),
+                    public,
+                ),
+                secret,
+                CIPHER_SUITE,
+            )
+            .build();
+
+        let mut mallory_group = mallory
+            .create_group_with_id(
+                server_group_id(&group_uuid),
+                ExtensionList::default(),
+                ExtensionList::default(),
+                None,
+            )
+            .unwrap();
+
+        let addition = mallory_group
+            .commit_builder()
+            .add_member(MlsMessage::from_bytes(&bob.invitation().key_package).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        mallory_group.apply_pending_commit().unwrap();
+
+        let joined = bob
+            .client
+            .join_group(
+                addition.welcome_messages[0].to_bytes().unwrap(),
+                Some(group_uuid),
+                vec![mallory_uuid.clone()],
+                true,
+            )
+            .unwrap();
+        let bob_group = bob.client.load_group(joined).unwrap();
+
+        let update = mallory_group.commit(Vec::new()).unwrap().commit_message;
+
+        assert_eq!(update.wire_format(), WireFormat::PublicMessage);
+
+        let before = bob.store.records();
+
+        for policy in [commit_policy(&mallory_uuid, &[]), None] {
+            let error = bob_group
+                .process_incoming_message(update.to_bytes().unwrap(), policy)
+                .expect_err("a Commit sent in the clear by a member must be refused");
+
+            assert!(matches!(error, MlsError::InvalidMessage));
+        }
+
+        assert_eq!(bob.store.records(), before);
+        assert_eq!(bob_group.epoch().unwrap(), mallory_group.current_epoch());
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_nobody_this_device_trusts_signed() {
+        // Bob signs back in with Alice pinned, but not Carol, who is no contact of
+        // his: her GroupInfo is the server's word for the group, as far as his device
+        // can tell.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let bob_back = signed_back_in(&bob, &[&alice]);
+        let before = bob_back.store.records();
+
+        let error =
+            rejoin_from(&bob_back, carol_group, &group_uuid, &[&alice, &carol]).unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+
+        // Nor one whose signer holds a key other than the one pinned for them.
+        let bob_misled = signed_back_in(&bob, &[]);
+
+        bob_misled
+            .client
+            .pin_identity(alice.uuid.clone(), carol.client.signature_public_key())
+            .unwrap();
+
+        let error =
+            rejoin_from(&bob_misled, alice_group, &group_uuid, &[&alice, &carol]).unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+
+        // Nor Alice's once anything of it changed, which her signature no longer
+        // holds for.
+        let mut altered = alice_group.rejoin_group_info().unwrap();
+        *altered.last_mut().unwrap() ^= 1;
+
+        let error = bob_back
+            .client
+            .rejoin_group(
+                altered,
+                group_uuid.clone(),
+                alice_group.epoch().unwrap(),
+                uuids(&[&alice, &carol]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+
+        // Nor one signed in Bob's name under a key his device does not hold, as the
+        // server can make one: a client of its own under his UUID, adding Alice and
+        // Carol from key packages it hands out. Refused as untrusted, so that the
+        // host goes on to another member's GroupInfo, rather than a step later for
+        // holding him under that key. With a leaf of his under his own key besides,
+        // from one of his key packages, it would pass every other check, and be
+        // refused only as the Commit is built, once whatever his device held of the
+        // group is deleted.
+        for holding_his_own_leaf in [false, true] {
+            let mut forged = outsider(&bob.uuid, None)
+                .create_group_with_id(
+                    server_group_id(&group_uuid),
+                    ExtensionList::default(),
+                    ExtensionList::default(),
+                    None,
+                )
+                .unwrap();
+
+            let mut invitations = vec![alice.invitation(), carol.invitation()];
+
+            if holding_his_own_leaf {
+                invitations.push(bob.invitation());
+            }
+
+            let mut commit_builder = forged.commit_builder();
+
+            for invitation in invitations {
+                commit_builder = commit_builder
+                    .add_member(MlsMessage::from_bytes(&invitation.key_package).unwrap())
+                    .unwrap();
+            }
+
+            commit_builder.build().unwrap();
+            forged.apply_pending_commit().unwrap();
+
+            let error = bob_back
+                .client
+                .rejoin_group(
+                    forged
+                        .group_info_message_allowing_ext_commit(true)
+                        .unwrap()
+                        .to_bytes()
+                        .unwrap(),
+                    group_uuid.clone(),
+                    forged.current_epoch(),
+                    uuids(&[&alice, &carol]),
+                )
+                .unwrap_err();
+
+            assert!(
+                matches!(error, MlsError::UntrustedGroupInfo),
+                "holding his own leaf: {holding_his_own_leaf}: {error}"
+            );
+        }
+
+        // Nothing was deleted, stored or pinned, and Alice's is taken.
+        assert_eq!(bob_back.store.records(), before);
+
+        rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap();
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_a_group_info_the_users_own_key_signed() {
+        // Before he logged out, Bob's device exported a GroupInfo of its own. Signed
+        // back in with no pin at all, he rejoins from it: only his devices hold his
+        // signature key.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, bob_group, carol_group) = (&groups[0], &groups[1], &groups[2]);
+
+        let bob_back = signed_back_in(&bob, &[]);
+
+        let rejoin = rejoin_from(&bob_back, bob_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        for group in [alice_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, .. }
+                    if committer_user_uuid == Some(bob.uuid.clone())
+            ));
+        }
+
+        assert_eq!(
+            bob_back
+                .client
+                .load_group(rejoin.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid.clone())
+                .unwrap(),
+            alice_group.content_key(group_uuid).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_of_another_group_or_epoch() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob]);
+        let alice_group = &groups[0];
+
+        let bob_back = signed_back_in(&bob, &[&alice]);
+        let before = bob_back.store.records();
+
+        let group_info = alice_group.rejoin_group_info().unwrap();
+        let epoch = alice_group.epoch().unwrap();
+
+        // Another group's UUID.
+        let error = bob_back
+            .client
+            .rejoin_group(
+                group_info.clone(),
+                new_group_uuid(),
+                epoch,
+                uuids(&[&alice]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, MlsError::UnexpectedGroupId));
+
+        // Another epoch than the one the server lists the group in, on either side.
+        for expected_epoch in [epoch - 1, epoch + 1] {
+            let error = bob_back
+                .client
+                .rejoin_group(
+                    group_info.clone(),
+                    group_uuid.clone(),
+                    expected_epoch,
+                    uuids(&[&alice]),
+                )
+                .unwrap_err();
+
+            assert!(matches!(error, MlsError::InvalidMessage));
+        }
+
+        // What is not a GroupInfo an external commit can be built from: one with no
+        // key for it, an application message, and bytes that are no message.
+        let not_for_rejoining = [
+            alice_group.group_info().to_bytes().unwrap(),
+            alice_group
+                .encrypt_application_message(b"hello".to_vec())
+                .unwrap(),
+            b"not a message".to_vec(),
+        ];
+
+        for message in not_for_rejoining {
+            let error = bob_back
+                .client
+                .rejoin_group(message, group_uuid.clone(), epoch, uuids(&[&alice]))
+                .unwrap_err();
+
+            assert!(matches!(error, MlsError::InvalidMessage));
+        }
+
+        assert_eq!(bob_back.store.records(), before);
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_of_a_group_past_the_member_cap() {
+        // The creator of a group of a hundred and one holding Bob's leaf, which no
+        // client of this library makes, exports a GroupInfo of it, and the host
+        // expects every one of them. It would pass every other check, and Bob's
+        // device would hold a group past the cap: what a group may store counts no
+        // more than a hundred members.
+        let bob = TestUser::new();
+
+        // Bob signed back in with the creator pinned, rejoining a group of
+        // `member_count` from the GroupInfo they export. Nothing is deleted, stored
+        // or pinned.
+        let rejoin_a_group_of = |member_count: usize| {
+            let (mut group, _, group_uuid, others) = group_of(member_count, &bob);
+            group.apply_pending_commit().unwrap();
+
+            let bob_back = signed_back_in(&bob, &[]);
+
+            bob_back
+                .client
+                .pin_identity(
+                    others[0].clone(),
+                    group
+                        .current_member_signing_identity()
+                        .unwrap()
+                        .signature_key
+                        .to_vec(),
+                )
+                .unwrap();
+
+            let before = bob_back.store.records();
+
+            let error = bob_back
+                .client
+                .rejoin_group(
+                    group
+                        .group_info_message_allowing_ext_commit(true)
+                        .unwrap()
+                        .to_bytes()
+                        .unwrap(),
+                    group_uuid,
+                    group.current_epoch(),
+                    others,
+                )
+                .expect_err("a group past what a test lets it store must be refused");
+
+            assert_eq!(bob_back.store.records(), before);
+
+            error
+        };
+
+        assert!(matches!(
+            rejoin_a_group_of(MAX_GROUP_MEMBERS + 1),
+            MlsError::TooManyMembers
+        ));
+
+        // A group of exactly the cap is let in, and stopped only when stored, as a
+        // test lets a group of a hundred store some 260 KB.
+        assert!(matches!(
+            rejoin_a_group_of(MAX_GROUP_MEMBERS),
+            MlsError::GroupStateTooLarge
+        ));
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_holding_other_members_than_expected() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+        let stranger = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let alice_group = &groups[0];
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+        let before = bob_back.store.records();
+
+        // Somebody left out, somebody more, and this user named among the others.
+        for others in [
+            vec![&alice],
+            vec![&alice, &carol, &stranger],
+            vec![&alice, &bob, &carol],
+        ] {
+            let error = rejoin_from(&bob_back, alice_group, &group_uuid, &others).unwrap_err();
+
+            assert!(matches!(error, MlsError::UnexpectedMembers));
+        }
+
+        assert_eq!(bob_back.store.records(), before);
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_without_the_users_own_leaf() {
+        // Alice removed Bob while his device was logged out: there is no leaf of his
+        // to come back to.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let alice_group = &groups[0];
+
+        alice_group.remove_members(vec![bob.uuid.clone()]).unwrap();
+        accept(alice_group);
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+
+        let error =
+            rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap_err();
+
+        assert!(matches!(error, MlsError::UnexpectedMembers));
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_no_group_info_holding_the_user_under_another_key() {
+        // Bob's device signs back in under a signature key other than the one his
+        // leaf holds: members would never take the leaf it seats.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let other = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob]);
+        let alice_group = &groups[0];
+
+        let store = TestStore::new();
+        let client = MlsClient::restore(
+            bob.uuid.clone(),
+            SECRET.to_vec(),
+            store.clone(),
+            other.client.signature_private_key(),
+            other.client.signature_public_key(),
+        )
+        .unwrap();
+
+        client
+            .pin_identity(alice.uuid.clone(), alice.client.signature_public_key())
+            .unwrap();
+
+        let bob_misplaced = TestUser {
+            uuid: bob.uuid.clone(),
+            store,
+            client,
+        };
+
+        let error = rejoin_from(&bob_misplaced, alice_group, &group_uuid, &[&alice]).unwrap_err();
+
+        assert!(matches!(error, MlsError::UnexpectedMembers));
+    }
+
+    #[test]
+    fn test_a_rejoin_the_server_refused_is_deleted_and_made_again_from_a_newer_group_info() {
+        // Bob's rejoin loses the epoch to a Commit of Alice's, which the server took
+        // first. His device deletes the group and rejoins from a GroupInfo of the
+        // epoch the server is in now.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+
+        let refused = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        let update = alice_group.update().unwrap();
+
+        carol_group
+            .process_incoming_message(update, created_by(&alice))
+            .unwrap();
+        accept(alice_group);
+
+        // Built for the epoch that ended, it would be refused by every member had
+        // the server let it through.
+        assert!(matches!(
+            carol_group
+                .process_incoming_message(refused.commit, created_by(&alice))
+                .unwrap_err(),
+            MlsError::ProtocolFailed(_)
+        ));
+
+        bob_back
+            .client
+            .delete_group(refused.mls_group_id.clone())
+            .unwrap();
+
+        assert!(matches!(
+            bob_back
+                .client
+                .load_group(refused.mls_group_id.clone())
+                .unwrap_err(),
+            MlsError::GroupNotFound
+        ));
+
+        let rejoin = rejoin_from(&bob_back, carol_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        assert_eq!(rejoin.mls_group_id, refused.mls_group_id);
+        assert_eq!(rejoin.epoch, refused.epoch + 1);
+
+        for group in [alice_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, .. }
+                    if committer_user_uuid == Some(bob.uuid.clone())
+            ));
+        }
+
+        let key = alice_group.content_key(group_uuid.clone()).unwrap();
+
+        assert_eq!(carol_group.content_key(group_uuid.clone()).unwrap(), key);
+        assert_eq!(
+            bob_back
+                .client
+                .load_group(rejoin.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid)
+                .unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn test_a_second_commit_built_from_the_same_group_info_is_refused() {
+        // A GroupInfo is for one Commit. Once members applied Bob's, another built
+        // from the same GroupInfo, by another device of his signed back in, is for an
+        // epoch they have left.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let group_info = alice_group.rejoin_group_info().unwrap();
+        let epoch = alice_group.epoch().unwrap();
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+        let bob_again = signed_back_in(&bob, &[&alice, &carol]);
+
+        let first = bob_back
+            .client
+            .rejoin_group(
+                group_info.clone(),
+                group_uuid.clone(),
+                epoch,
+                uuids(&[&alice, &carol]),
+            )
+            .unwrap();
+
+        for group in [alice_group, carol_group] {
+            group
+                .process_incoming_message(first.commit.clone(), created_by(&alice))
+                .unwrap();
+        }
+
+        let second = bob_again
+            .client
+            .rejoin_group(
+                group_info,
+                group_uuid.clone(),
+                epoch,
+                uuids(&[&alice, &carol]),
+            )
+            .unwrap();
+
+        let before = alice.store.records();
+
+        for group in [alice_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(second.commit.clone(), created_by(&alice))
+                    .unwrap_err(),
+                MlsError::ProtocolFailed(_)
+            ));
+        }
+
+        assert_eq!(alice.store.records(), before);
+
+        // The group goes on under the first.
+        let key = alice_group.content_key(group_uuid.clone()).unwrap();
+
+        assert_eq!(carol_group.content_key(group_uuid.clone()).unwrap(), key);
+        assert_eq!(
+            bob_back
+                .client
+                .load_group(first.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid)
+                .unwrap(),
+            key
+        );
+    }
+
+    #[test]
+    fn test_a_rejoin_over_the_state_an_earlier_one_left_behind_is_made() {
+        // The host stored a rejoin and never sent it, or never recorded it: the
+        // state it left behind goes, and the group is rejoined.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+
+        let orphan = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        bob_back
+            .client
+            .load_group(orphan.mls_group_id.clone())
+            .unwrap();
+
+        let rejoin = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice, &carol]).unwrap();
+
+        assert_eq!(rejoin.mls_group_id, orphan.mls_group_id);
+
+        for group in [alice_group, carol_group] {
+            assert!(matches!(
+                group
+                    .process_incoming_message(rejoin.commit.clone(), created_by(&alice))
+                    .unwrap(),
+                ProcessedMessage::Commit { committer_user_uuid, .. }
+                    if committer_user_uuid == Some(bob.uuid.clone())
+            ));
+        }
+
+        assert_eq!(
+            bob_back
+                .client
+                .load_group(rejoin.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid.clone())
+                .unwrap(),
+            alice_group.content_key(group_uuid).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_a_rejoin_over_the_epochs_a_write_cut_short_left_behind_is_made() {
+        // A write is cut short between the epochs it writes and the state it
+        // writes last: epochs nothing refers to stay behind, which would keep
+        // mls-rs from storing the group the rejoin builds.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob]);
+        let alice_group = &groups[0];
+
+        let bob_back = signed_back_in(&bob, &[&alice]);
+
+        let orphan = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice]).unwrap();
+
+        bob_back
+            .store
+            .delete(MlsNamespace::GroupState, orphan.mls_group_id.clone())
+            .unwrap();
+
+        assert!(bob_back.store.count(MlsNamespace::GroupEpoch) > 0);
+
+        let rejoin = rejoin_from(&bob_back, alice_group, &group_uuid, &[&alice]).unwrap();
+
+        assert!(matches!(
+            alice_group
+                .process_incoming_message(rejoin.commit, created_by(&alice))
+                .unwrap(),
+            ProcessedMessage::Commit { committer_user_uuid, .. }
+                if committer_user_uuid == Some(bob.uuid.clone())
+        ));
+
+        assert_eq!(
+            bob_back
+                .client
+                .load_group(rejoin.mls_group_id)
+                .unwrap()
+                .content_key(group_uuid.clone())
+                .unwrap(),
+            alice_group.content_key(group_uuid).unwrap()
+        );
     }
 
     /// Whether a serialised key package carries the last-resort extension.

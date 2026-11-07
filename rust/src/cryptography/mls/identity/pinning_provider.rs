@@ -39,8 +39,13 @@
 //! [`MlsGroup::process_incoming_message`](crate::cryptography::mls::group::MlsGroup::process_incoming_message),
 //! which seats nobody, and the update path it carries keeps the leaf its
 //! committer had, signature key included, see `check_member_committer_leaf`
-//! in `config.rs`. So every leaf in the tree was added by the creator, and
-//! holds the key the creator seated it with.
+//! in `config.rs`. The one Commit taken from outside the group is a member's
+//! resync of their own leaf, as they rejoin after a log-out, see
+//! [`MlsClient::rejoin_group`](crate::cryptography::mls::client::MlsClient::rejoin_group):
+//! it seats again the member whose leaf it removes, under the signature key
+//! that leaf held, and nobody else, see `allows_rejoin` in `config.rs`. So
+//! every leaf in the tree names a member the creator added, and holds the key
+//! the creator seated them with.
 
 use mls_rs::ExtensionList;
 use mls_rs::identity::{CredentialType, SigningIdentity};
@@ -132,6 +137,13 @@ impl IdentityProvider for PinningIdentityProvider {
         // consulted, see `check_member_committer_leaf` in `config.rs`, and
         // every member refuses it alike. The creator's is held to the key the
         // host pinned for them before joining from their Welcome.
+        //
+        // An external commit has it asked the other way round, of the leaf it
+        // removes and the one it seats, before `validate_member` sees the
+        // latter: the resync a member rejoins with after a log-out. Its
+        // committer has to come back as who they were, under the key they
+        // had, which the commit policy checks first, see `allows_rejoin` in
+        // `config.rs`, so that this agrees.
         Ok(
             user_uuid_from(&predecessor.credential)? == user_uuid_from(&successor.credential)?
                 && predecessor.signature_key == successor.signature_key,

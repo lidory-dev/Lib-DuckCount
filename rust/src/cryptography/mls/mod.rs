@@ -4,6 +4,15 @@
 //! application messages as opaque ciphertext and never holds group secrets;
 //! every cryptographic decision lives here.
 //!
+//! The one exception to that ciphertext is a member coming back to a group
+//! after a log-out took their state, see
+//! [`MlsClient::rejoin_group`](client::MlsClient::rejoin_group). The Commit
+//! they rejoin with travels in the clear, as MLS has every Commit from outside
+//! a group do, and so does the GroupInfo they rejoin from, which another
+//! member exports for them and the server hands on, nobody else being there
+//! to. The server sees the group's public tree in them, its members' user
+//! UUIDs and public keys, and nothing it could read the group with.
+//!
 //! # Cipher suite
 //!
 //! Exactly one cipher suite is enabled: [`CIPHER_SUITE`], the X-Wing hybrid of
@@ -110,30 +119,46 @@ pub enum MlsError {
     /// deletion. Joining it would put that group back at an epoch this device
     /// held already.
     GroupAlreadyJoined,
-    /// A Welcome is for a group whose id is not the one derived for the group
-    /// the host expects it to be, see [`group_id`]: whoever wrote it gave it
-    /// the id of another group, or one no client of this library derives.
+    /// A Welcome, or a GroupInfo a rejoin is built from, is for a group whose
+    /// id is not the one derived for the group the host expects it to be, see
+    /// [`group_id`]: whoever wrote it gave it the id of another group, or one
+    /// no client of this library derives.
     UnexpectedGroupId,
-    /// A group, one a Welcome is for or one already joined, holds members
-    /// other than exactly this user and the ones the host expected, or does
-    /// not hold, besides this user, the one member the host named, or a
-    /// Commit adding members would add somebody another member proposed too.
+    /// A group, one a Welcome or a GroupInfo is for or one already joined,
+    /// holds members other than exactly this user and the ones the host
+    /// expected, or does not hold, besides this user, the one member the host
+    /// named, or a Commit adding members would add somebody another member
+    /// proposed too. A GroupInfo a rejoin is built from is refused this way
+    /// too when it does not hold this user's own leaf, under the signature
+    /// key this device holds.
     UnexpectedMembers,
+    /// A GroupInfo was signed by nobody this device trusts: neither by this
+    /// user's own signature key nor by the key pinned for the member it names
+    /// as its signer, or its signature does not hold, see
+    /// [`MlsClient::rejoin_group`](client::MlsClient::rejoin_group). Another
+    /// member's may be.
+    UntrustedGroupInfo,
     /// A group would hold more than [`MAX_GROUP_MEMBERS`] members: one being
     /// created or added to, refused before anything is built, or one a
-    /// Welcome is for, refused before anything is stored or pinned.
+    /// Welcome or a GroupInfo a rejoin is built from is for, refused before
+    /// anything is stored or pinned.
     TooManyMembers,
     /// No member of the group holds the given user UUID.
     MemberNotFound(String),
     /// An MLS message could not be decoded, or describes a group no client of
-    /// this library produces.
+    /// this library produces, or is not the kind of message the operation
+    /// takes: a GroupInfo a rejoin is built from is refused this way when it
+    /// is not a GroupInfo, does not carry the ratchet tree and the key an
+    /// external commit is built with, or is for an epoch other than the one
+    /// the host expected.
     InvalidMessage,
     /// A message would change a group in a way the host does not allow: a
     /// Commit the commit policy the host holds the group to does not allow,
     /// refused before anything it carries is checked, or before the leaf its
     /// update path gives a committer other than the creator is checked against
     /// any pin, or a Proposal, which no member may send where a policy is
-    /// held, see
+    /// held, or a Commit from outside the group other than a member's resync
+    /// of their own leaf, see
     /// [`process_incoming_message`](group::MlsGroup::process_incoming_message).
     /// Nothing was stored, and the group is as it was.
     UnauthorizedChange,
@@ -193,6 +218,9 @@ impl Display for MlsError {
             }
             MlsError::UnexpectedMembers => {
                 write!(f, "The MLS group does not hold the expected members.")
+            }
+            MlsError::UntrustedGroupInfo => {
+                write!(f, "The MLS GroupInfo was not signed by a trusted member.")
             }
             MlsError::TooManyMembers => write!(
                 f,

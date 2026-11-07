@@ -2,6 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use mls_rs::extension::ExtensionType;
+use mls_rs::extension::built_in::RatchetTreeExt;
 use mls_rs::identity::SigningIdentity;
 use mls_rs::time::MlsTime;
 use mls_rs::{Client, ExtensionList, Group, MlsMessage};
@@ -12,7 +14,7 @@ use crate::cryptography::mls::{
     config::{DuckCountMlsConfig, KEY_PACKAGE_RETENTION_AFTER_EXPIRY, build_client},
     group::{MlsGroup, expected_peers, peers, pin_peers, store},
     group_expense::{self, GroupExpenseDeletion, GroupExpenseVersion},
-    group_id::{self, new_mls_group_id},
+    group_id::{self, new_mls_group_id, server_group_id},
     group_information::{self, GroupInformation},
     identity::{
         credential::{credential_for, user_uuid_from},
@@ -30,16 +32,17 @@ use crate::cryptography::mls::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
         key_package::SealedKeyPackageStorage, sealed_record::SealingKey,
     },
-    types::{GroupCreation, InviteeKeyPackage, KeyPackageBundle, WelcomeInspection},
+    types::{GroupCreation, GroupRejoin, InviteeKeyPackage, KeyPackageBundle, WelcomeInspection},
 };
 
-/// The highest epoch a Welcome may put a joined group at.
+/// The highest epoch a Welcome, or a GroupInfo a rejoin is built from, may
+/// put a joined group at.
 ///
 /// A group moves one epoch per commit, so no real group comes near it, and it
 /// sits far enough below `u64::MAX` that no run of commits can overflow the
 /// `epoch += 1` mls-rs makes on each one, which panics in a debug build. A
-/// Welcome is the only way an epoch this device did not count up to itself
-/// reaches its state, and it is its author's to write.
+/// Welcome and a GroupInfo are the only ways an epoch this device did not
+/// count up to itself reaches its state, and each is its author's to write.
 const MAX_JOINED_EPOCH: u64 = u32::MAX as u64;
 
 /// One user's MLS client.
@@ -47,9 +50,9 @@ const MAX_JOINED_EPOCH: u64 = u32::MAX as u64;
 /// # Relationship to the DuckCount API
 ///
 /// Every method here produces bytes for exactly one API call, or consumes bytes
-/// from one. The client knows nothing about HTTP or message ordering (those
-/// belong to the host), and of the API's group UUIDs only that the id of a
-/// group it holds is derived from one, see [`group_id`].
+/// from one, or both, as a rejoin does. The client knows nothing about HTTP or
+/// message ordering (those belong to the host), and of the API's group UUIDs
+/// only that the id of a group it holds is derived from one, see [`group_id`].
 ///
 /// # Threading
 ///
@@ -629,6 +632,164 @@ impl MlsClient {
         Ok(opened.group.group_id().to_vec())
     }
 
+    /// Rejoins a group the DuckCount API holds from outside it, with the
+    /// GroupInfo `group_info` another member exported, see
+    /// [`MlsGroup::rejoin_group_info`], for a member whose device holds none
+    /// of the group's state: one a log-out emptied.
+    ///
+    /// A log-out takes every group's state with it, and a member who signs
+    /// back in is still a member of each: the server lists them, the others
+    /// keep encrypting to the leaf they had, but this device holds none of the
+    /// secrets to read what they write. RFC 9420's resync brings it back: an
+    /// external commit removing the leaf this user had and seating a new one,
+    /// naming the same user under the same signature key, which
+    /// [`restore`](Self::restore) put back from the vault. Nothing else
+    /// changes, and every member takes it, from any member, see
+    /// [`MlsGroup::process_incoming_message`]: the group holds the same
+    /// members once it is applied, and the same keys but for the ones this
+    /// device decrypts with. The Commit is for
+    /// `POST /groups/{uuid}/commits/rejoin`, which stores it as the one Commit
+    /// of the epoch the server lists the group in.
+    ///
+    /// The GroupInfo travels through the server unsealed, so before anything
+    /// is built, it has to be one this device can take the word of, and for
+    /// the group the host expects:
+    ///
+    /// * its signer, the member it names as having signed it, has to hold, in
+    ///   the tree it carries, the key pinned for them, or be this user under
+    ///   this user's own signature key, as a GroupInfo this user's device
+    ///   exported before it was logged out is, and the signature has to hold:
+    ///   anything else is the server's word for the group, and is refused as
+    ///   [`MlsError::UntrustedGroupInfo`];
+    /// * its group id has to be the one derived for `expected_group_uuid`, see
+    ///   [`group_id`], and its epoch `expected_epoch`, the one the server
+    ///   lists the group in, and stores the next Commit for;
+    /// * its tree has to hold this user and exactly `expected_members`, at
+    ///   most [`MAX_GROUP_MEMBERS`] in all, and hold this user under the
+    ///   signature key this device holds: the leaf the Commit removes.
+    ///
+    /// Every leaf of the tree is then checked against the key pinned for whom
+    /// it names, as on a join. Nobody is pinned, as on a join that pins
+    /// nobody, see [`join_group`](Self::join_group): the members are who the
+    /// signer, a member this device trusts, says they are, and the host pins
+    /// any of them from the group as it would in a group it joined, with
+    /// [`MlsGroup::pin_member`].
+    ///
+    /// mls-rs builds a Commit from outside a group applied: the group this
+    /// stores is in the epoch the Commit makes, `expected_epoch + 1`, and holds
+    /// no Commit pending, unlike after every other Commit, see
+    /// [`MlsGroup::has_pending_commit`]. Nor does it hold anything of the epoch
+    /// before, which this device never held: the content key of the epoch the
+    /// GroupInfo is for is not this device's to derive, only that of the epoch
+    /// the Commit makes, see [`MlsGroup::content_key`]. If the server refuses
+    /// the Commit, its epoch taken by another, the host deletes the group, see
+    /// [`delete_group`](Self::delete_group), and rejoins it from a GroupInfo
+    /// of the epoch the server is in. A GroupInfo is for one Commit: members
+    /// refuse a second built from it, its epoch gone once the first is
+    /// applied.
+    ///
+    /// Whatever this device holds of the group already is deleted first: the
+    /// state an earlier rejoin stored, whose Commit the host never sent or
+    /// never recorded, and the records of epochs a write cut short left
+    /// behind. The host rejoins a group only once it holds no record of it,
+    /// so either would be an orphan of an earlier attempt, and either would
+    /// keep mls-rs from storing the group it builds. It is deleted as
+    /// [`delete_group`](Self::delete_group) deletes it, keeping the record of
+    /// the epoch it was at, once the GroupInfo has passed every check above,
+    /// and before mls-rs checks the tree against it: a GroupInfo refused then
+    /// leaves the device with neither.
+    ///
+    /// [`MlsGroup::rejoin_group_info`]: crate::cryptography::mls::group::MlsGroup::rejoin_group_info
+    /// [`MlsGroup::process_incoming_message`]: crate::cryptography::mls::group::MlsGroup::process_incoming_message
+    /// [`MlsGroup::pin_member`]: crate::cryptography::mls::group::MlsGroup::pin_member
+    /// [`MlsGroup::has_pending_commit`]: crate::cryptography::mls::group::MlsGroup::has_pending_commit
+    /// [`MlsGroup::content_key`]: crate::cryptography::mls::group::MlsGroup::content_key
+    ///
+    /// # Arguments
+    ///
+    /// * `group_info` - The GroupInfo a member exported, as the server served
+    ///   it.
+    /// * `expected_group_uuid` - The UUID the DuckCount API holds the group
+    ///   under, in canonical hyphenated lowercase form.
+    /// * `expected_epoch` - The epoch the server lists the group in.
+    /// * `expected_members` - The UUIDs of every member of the group other
+    ///   than this user, as its tree holds them: the members the server
+    ///   lists, and the departed ones whose removal nobody has committed yet.
+    ///
+    /// # Returns
+    ///
+    /// * `Result<GroupRejoin, MlsError>` - The group's id, the Commit, and the
+    ///   epoch it takes the group to.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::InvalidMessage` - If `group_info` cannot be parsed, is not
+    ///   a GroupInfo, carries no ratchet tree or no key to build an external
+    ///   commit with, as one [`MlsGroup::rejoin_group_info`] exports always
+    ///   does, or is for an epoch other than `expected_epoch`, or past
+    ///   2^32 - 1, which no real group reaches. Nothing is deleted.
+    /// * `MlsError::UnexpectedGroupId` - If the group's id is not the one
+    ///   derived for `expected_group_uuid`. Nothing is deleted.
+    /// * `MlsError::TooManyMembers` - If the tree holds more than
+    ///   [`MAX_GROUP_MEMBERS`] members. Nothing is deleted.
+    /// * `MlsError::UntrustedGroupInfo` - If the GroupInfo's signer is neither
+    ///   this user under their own signature key nor a member under the key
+    ///   pinned for them, or its signature does not hold. Nothing is deleted,
+    ///   and another member's GroupInfo may be taken.
+    /// * `MlsError::UnexpectedMembers` - If the tree's members are not this
+    ///   user and exactly `expected_members`, or hold this user under another
+    ///   signature key than this device's. Nothing is deleted.
+    /// * `MlsError::IdentityKeyMismatch` - If a member's signature key differs
+    ///   from the one pinned for them.
+    /// * `MlsError::InvalidCredential` - If a member's credential is malformed.
+    /// * `MlsError::GroupStateTooLarge` - If the group would grow past the most
+    ///   a group may store. Nothing is stored.
+    /// * `MlsError::LockPoisoned` - If a previous MLS call panicked.
+    /// * `MlsError::ProtocolFailed` - If the tree does not match the
+    ///   GroupInfo, or the Commit cannot be built.
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    pub fn rejoin_group(
+        &self,
+        group_info: Vec<u8>,
+        expected_group_uuid: String,
+        expected_epoch: u64,
+        expected_members: Vec<String>,
+    ) -> Result<GroupRejoin, MlsError> {
+        let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
+
+        let group_info =
+            MlsMessage::from_bytes(&group_info).map_err(|_| MlsError::InvalidMessage)?;
+
+        let own_index = self.rejoined_leaf(
+            &client,
+            &group_info,
+            &expected_group_uuid,
+            expected_epoch,
+            expected_members,
+        )?;
+
+        let group_id = server_group_id(&expected_group_uuid);
+
+        self.delete_held_group(&client, &group_id)?;
+        self.group_states.delete_epochs(&group_id)?;
+
+        // With no time to check leaves against, as on a join: a member who
+        // never committed keeps the leaf of the key package they were added
+        // with, whose lifetime may have ended long since.
+        let (mut group, commit) = client
+            .external_commit_builder()?
+            .with_removal(own_index)
+            .build(group_info)?;
+
+        store(&mut group)?;
+
+        Ok(GroupRejoin {
+            mls_group_id: group.group_id().to_vec(),
+            commit: commit.to_bytes()?,
+            epoch: group.current_epoch(),
+        })
+    }
+
     /// Opens a group this user already belongs to.
     ///
     /// # Arguments
@@ -681,26 +842,7 @@ impl MlsClient {
         // record would otherwise not count towards it.
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
-        // A group no longer stored was either deleted already, and keeps the
-        // record written then, with the epoch it was at, or never joined, and
-        // has no Welcome to refuse. One whose state no longer opens, damaged
-        // or written by another version of mls-rs, goes all the same, as
-        // nothing else would ever remove it: not knowing the epoch it was at,
-        // the record refuses every Welcome to it until pruning forgets it.
-        // Only a storage failure says nothing of the state, and is worth
-        // trying again.
-        let epoch = match client.load_group(&mls_group_id).map_err(MlsError::from) {
-            Ok(group) => group.current_epoch(),
-            Err(MlsError::GroupNotFound) => return Ok(()),
-            Err(error @ MlsError::StorageFailed(_)) => return Err(error),
-            Err(_) => u64::MAX,
-        };
-
-        // Holding none, it can open no Welcome, and the record may go at once.
-        let openable_until = self.key_packages.latest_expiration()?.unwrap_or(0);
-
-        self.group_states
-            .delete_group(&mls_group_id, openable_until, epoch)
+        self.delete_held_group(&client, &mls_group_id)
     }
 
     /// The safety number of this user and another, if a key is pinned for them.
@@ -883,6 +1025,158 @@ impl MlsClient {
             committer_user_uuid,
             welcome_payload: welcome_payload(&new_member_info.group_info_extensions),
         })
+    }
+
+    /// Deletes the group stored under `mls_group_id`, if this device holds it,
+    /// as [`delete_group`](Self::delete_group) says.
+    ///
+    /// `client` is the client, locked by the caller.
+    fn delete_held_group(
+        &self,
+        client: &Client<DuckCountMlsConfig>,
+        mls_group_id: &[u8],
+    ) -> Result<(), MlsError> {
+        // A group no longer stored was either deleted already, and keeps the
+        // record written then, with the epoch it was at, or never joined, and
+        // has no Welcome to refuse. One whose state no longer opens, damaged
+        // or written by another version of mls-rs, goes all the same, as
+        // nothing else would ever remove it: not knowing the epoch it was at,
+        // the record refuses every Welcome to it until pruning forgets it.
+        // Only a storage failure says nothing of the state, and is worth
+        // trying again.
+        let epoch = match client.load_group(mls_group_id).map_err(MlsError::from) {
+            Ok(group) => group.current_epoch(),
+            Err(MlsError::GroupNotFound) => return Ok(()),
+            Err(error @ MlsError::StorageFailed(_)) => return Err(error),
+            Err(_) => u64::MAX,
+        };
+
+        // Holding none, it can open no Welcome, and the record may go at once.
+        let openable_until = self.key_packages.latest_expiration()?.unwrap_or(0);
+
+        self.group_states
+            .delete_group(mls_group_id, openable_until, epoch)
+    }
+
+    /// The index of the leaf this user holds in the tree `group_info`
+    /// carries, once it has passed every check
+    /// [`rejoin_group`](Self::rejoin_group) makes before it builds anything.
+    ///
+    /// It changes nothing: the identity provider it checks the signer with
+    /// only reads their pin.
+    ///
+    /// `client` is the client, locked by the caller.
+    fn rejoined_leaf(
+        &self,
+        client: &Client<DuckCountMlsConfig>,
+        group_info: &MlsMessage,
+        expected_group_uuid: &str,
+        expected_epoch: u64,
+        mut expected_members: Vec<String>,
+    ) -> Result<u32, MlsError> {
+        let info = group_info.as_group_info().ok_or(MlsError::InvalidMessage)?;
+        let context = info.group_context();
+
+        // Every GroupInfo `MlsGroup::rejoin_group_info` exports carries both:
+        // the tree, which the server does not store, and the key the Commit
+        // is built with.
+        if !info.extensions().has_extension(ExtensionType::EXTERNAL_PUB) {
+            return Err(MlsError::InvalidMessage);
+        }
+
+        let tree = info
+            .extensions()
+            .get_as::<RatchetTreeExt>()
+            .map_err(|_| MlsError::InvalidMessage)?
+            .ok_or(MlsError::InvalidMessage)?;
+
+        group_id::check(
+            &context.group_id,
+            Some(expected_group_uuid),
+            info.extensions(),
+        )?;
+
+        // The one the server stores the next Commit for: a GroupInfo of any
+        // other makes a Commit the server refuses, and members too.
+        if context.epoch != expected_epoch || context.epoch > MAX_JOINED_EPOCH {
+            return Err(MlsError::InvalidMessage);
+        }
+
+        let roster = tree.tree_data.roster();
+
+        if roster.members_iter().count() > MAX_GROUP_MEMBERS {
+            return Err(MlsError::TooManyMembers);
+        }
+
+        // Before the members are read: they are the signer's word, the tree
+        // being covered by the signature, as all the GroupInfo says is.
+        let signer = roster
+            .member_with_index(info.sender())
+            .map_err(|_| MlsError::UntrustedGroupInfo)?
+            .signing_identity;
+
+        if !self.trusts(&signer)? {
+            return Err(MlsError::UntrustedGroupInfo);
+        }
+
+        client
+            .validate_group_info(group_info, &signer)
+            .map_err(|error| match error {
+                mls_rs::error::MlsError::InvalidSignature => MlsError::UntrustedGroupInfo,
+                error => error.into(),
+            })?;
+
+        let mut own_leaf = None;
+        let mut peers = Vec::new();
+
+        for member in roster.members_iter() {
+            let user_uuid = user_uuid_from(&member.signing_identity.credential)?;
+
+            if user_uuid == self.user_uuid {
+                own_leaf = Some(member);
+            } else {
+                peers.push(user_uuid);
+            }
+        }
+
+        // Exact, as in `expected_peers`: a tree in which two leaves share an
+        // identity is refused as the Commit is built.
+        peers.sort_unstable();
+        expected_members.sort_unstable();
+
+        if peers != expected_members {
+            return Err(MlsError::UnexpectedMembers);
+        }
+
+        // The leaf the Commit removes, which members take only for a leaf
+        // naming this user under the key the leaf the Commit seats holds,
+        // this device's.
+        own_leaf
+            .filter(|member| {
+                member.signing_identity.signature_key == self.signature_key_pair.public
+            })
+            .map(|member| member.index)
+            .ok_or(MlsError::UnexpectedMembers)
+    }
+
+    /// Whether `signer` is somebody this device takes a GroupInfo from: this
+    /// user under their own signature key, which only their devices hold, or
+    /// a member under the key pinned for them.
+    ///
+    /// # Errors
+    ///
+    /// * `MlsError::StorageFailed` - If the host storage fails.
+    /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
+    fn trusts(&self, signer: &SigningIdentity) -> Result<bool, MlsError> {
+        let Ok(user_uuid) = user_uuid_from(&signer.credential) else {
+            return Ok(false);
+        };
+
+        if user_uuid == self.user_uuid {
+            return Ok(signer.signature_key == self.signature_key_pair.public);
+        }
+
+        Ok(self.pins.pinned_key(&user_uuid)?.as_deref() == Some(signer.signature_key.as_ref()))
     }
 
     /// [`MlsClient::prune_key_packages`], deleting the key packages that
