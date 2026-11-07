@@ -56,8 +56,14 @@ crate-type = ["cdylib", "staticlib", "lib"]
 path = "rust/src/lib.rs"
 
 # One unit, so that the machine building it has no say in how the code is split.
+# Optimized as a whole with every crate it uses, which makes the Android library 4% smaller
+# (3.98 MB to 3.83 MB on arm64), aws-lc's C code being out of its reach. Cargo runs it only
+# for a build that makes no Rust library (`lib` in `crate-type` above), so only for the
+# Android release, which asks for the shared library alone, see build.gradle.kts. iOS gets
+# none.
 [profile.release]
 codegen-units = 1
+lto = true
 
 # Unoptimized, Argon2 turns every login in a debug build into seconds of waiting
 # (2.4 s per run on a Pixel 7 Pro, against 0.14 s with this). Everything else in

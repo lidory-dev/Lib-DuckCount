@@ -81,6 +81,9 @@ cargo {
         }
         release.buildTaskProvider.configure {
             extraArguments.add("--locked")
+            // The shared library alone, all Android loads: Cargo runs no LTO, see Cargo.toml, for
+            // a build that also makes the Rust library the crate declares.
+            extraArguments.addAll("--crate-type", "cdylib")
             additionalEnvironment.put("CARGO_ENCODED_RUSTFLAGS", "--remap-path-prefix=$cargoHome=/cargo")
         }
     }
