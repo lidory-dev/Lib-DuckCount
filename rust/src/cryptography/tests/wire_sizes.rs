@@ -269,6 +269,7 @@ mod tests {
                     group_uuid,
                     full.epoch().unwrap(),
                     members[1..].to_vec(),
+                    Vec::new(),
                 )
                 .unwrap();
 

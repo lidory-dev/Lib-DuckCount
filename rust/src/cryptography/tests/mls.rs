@@ -47,7 +47,7 @@ mod tests {
     };
     use crate::cryptography::mls::storage::{MlsNamespace, MlsStore, MlsStoreError};
     use crate::cryptography::mls::types::{
-        CommitPolicy, GroupRejoin, InviteeKeyPackage, ProcessedMessage,
+        CommitPolicy, GroupRejoin, InviteeKeyPackage, ProcessedMessage, VouchedMember,
     };
     use crate::cryptography::mls::{CIPHER_SUITE, MAX_GROUP_MEMBERS, MlsError, max_group_members};
 
@@ -5470,6 +5470,7 @@ mod tests {
             group_uuid.to_string(),
             member.epoch().unwrap(),
             uuids(others),
+            Vec::new(),
         )
     }
 
@@ -6025,6 +6026,236 @@ mod tests {
         assert_eq!(bob_group.epoch().unwrap(), mallory_group.current_epoch());
     }
 
+    /// `member`, as a host records them from a group's tree while it holds
+    /// the group.
+    fn vouched(member: &TestUser) -> VouchedMember {
+        VouchedMember {
+            user_uuid: member.uuid.clone(),
+            signature_key: member.client.signature_public_key(),
+        }
+    }
+
+    /// `user`'s rejoin, as in [`rejoin_from`], its host vouching for
+    /// `vouched_members`.
+    fn rejoin_vouched(
+        user: &TestUser,
+        member: &MlsGroup,
+        group_uuid: &str,
+        others: &[&TestUser],
+        vouched_members: Vec<VouchedMember>,
+    ) -> Result<GroupRejoin, MlsError> {
+        user.client.rejoin_group(
+            member.rejoin_group_info().unwrap(),
+            group_uuid.to_string(),
+            member.epoch().unwrap(),
+            uuids(others),
+            vouched_members,
+        )
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_a_group_info_from_a_member_the_host_vouches_for() {
+        // Bob signs back in with nobody pinned, Carol never having been a contact
+        // of his: his host recorded her key from the group's tree while it held
+        // the group, and that is what vouches for her.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let carol_group = &groups[2];
+
+        let bob_back = signed_back_in(&bob, &[]);
+
+        let rejoin = rejoin_vouched(
+            &bob_back,
+            carol_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched(&carol)],
+        )
+        .unwrap();
+
+        assert_eq!(rejoin.epoch, carol_group.epoch().unwrap() + 1);
+    }
+
+    #[test]
+    fn test_a_rejoin_takes_a_vouched_member_only_under_the_key_vouched_for() {
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let carol_group = &groups[2];
+
+        let bob_back = signed_back_in(&bob, &[]);
+        let before = bob_back.store.records();
+
+        // Under a key that is somebody else's, as a forged GroupInfo signs with.
+        let another_key = VouchedMember {
+            user_uuid: carol.uuid.clone(),
+            signature_key: alice.client.signature_public_key(),
+        };
+
+        // Another member vouched for says nothing of the one who signed.
+        for vouched_members in [vec![], vec![another_key], vec![vouched(&alice)]] {
+            let error = rejoin_vouched(
+                &bob_back,
+                carol_group,
+                &group_uuid,
+                &[&alice, &carol],
+                vouched_members,
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, MlsError::UntrustedGroupInfo));
+        }
+
+        assert_eq!(bob_back.store.records(), before);
+    }
+
+    #[test]
+    fn test_a_pin_settles_whom_a_rejoin_trusts_whatever_is_vouched_for() {
+        // Bob's device pins another key for Carol than the one vouched for, the
+        // one she signs with: the host's record of a tree, its creator's word,
+        // does not stand against a pin.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let carol_group = &groups[2];
+
+        let bob_back = signed_back_in(&bob, &[]);
+
+        bob_back
+            .client
+            .pin_identity(carol.uuid.clone(), alice.client.signature_public_key())
+            .unwrap();
+
+        let error = rejoin_vouched(
+            &bob_back,
+            carol_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched(&carol)],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+    }
+
+    /// `member` as a host would have recorded them, but under another key.
+    fn vouched_under_another_key(member: &TestUser, other: &TestUser) -> VouchedMember {
+        VouchedMember {
+            user_uuid: member.uuid.clone(),
+            signature_key: other.client.signature_public_key(),
+        }
+    }
+
+    #[test]
+    fn test_a_rejoin_holds_every_leaf_to_what_is_vouched_for() {
+        // Carol is vouched for and signs, but her tree holds Alice under another key
+        // than the one Bob's host recorded for her: her word for the others goes no
+        // further than that. A pinned signer's goes no further either.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let bob_back = signed_back_in(&bob, &[]);
+        let before = bob_back.store.records();
+
+        let error = rejoin_vouched(
+            &bob_back,
+            carol_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched(&carol), vouched_under_another_key(&alice, &carol)],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+        assert_eq!(bob_back.store.records(), before);
+
+        let bob_trusting_alice = signed_back_in(&bob, &[&alice]);
+
+        let error = rejoin_vouched(
+            &bob_trusting_alice,
+            alice_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched_under_another_key(&carol, &alice)],
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, MlsError::UntrustedGroupInfo));
+    }
+
+    #[test]
+    fn test_a_pin_settles_a_leaf_whatever_is_vouched_for_it() {
+        // Bob's device pinned Carol's real key, and what his host recorded of her is
+        // out of date: the pin says who she is.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let alice_group = &groups[0];
+
+        let bob_back = signed_back_in(&bob, &[&alice, &carol]);
+
+        rejoin_vouched(
+            &bob_back,
+            alice_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched_under_another_key(&carol, &alice)],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_a_rejoin_says_whether_its_signer_was_pinned() {
+        // The host hands the group's older keys only to a signer it pinned: what it
+        // vouches for may be out of date, a member removed since among it.
+        let alice = TestUser::new();
+        let bob = TestUser::new();
+        let carol = TestUser::new();
+
+        let group_uuid = new_group_uuid();
+        let groups = establish_group_as(&group_uuid, &alice, &[&bob, &carol]);
+        let (alice_group, carol_group) = (&groups[0], &groups[2]);
+
+        let pinned = rejoin_from(
+            &signed_back_in(&bob, &[&alice]),
+            alice_group,
+            &group_uuid,
+            &[&alice, &carol],
+        )
+        .unwrap();
+
+        assert!(pinned.is_signer_pinned);
+
+        let vouched_for = rejoin_vouched(
+            &signed_back_in(&bob, &[]),
+            carol_group,
+            &group_uuid,
+            &[&alice, &carol],
+            vec![vouched(&carol)],
+        )
+        .unwrap();
+
+        assert!(!vouched_for.is_signer_pinned);
+    }
+
     #[test]
     fn test_a_rejoin_takes_no_group_info_nobody_this_device_trusts_signed() {
         // Bob signs back in with Alice pinned, but not Carol, who is no contact of
@@ -6071,6 +6302,7 @@ mod tests {
                 group_uuid.clone(),
                 alice_group.epoch().unwrap(),
                 uuids(&[&alice, &carol]),
+                Vec::new(),
             )
             .unwrap_err();
 
@@ -6122,6 +6354,7 @@ mod tests {
                     group_uuid.clone(),
                     forged.current_epoch(),
                     uuids(&[&alice, &carol]),
+                    Vec::new(),
                 )
                 .unwrap_err();
 
@@ -6198,6 +6431,7 @@ mod tests {
                 new_group_uuid(),
                 epoch,
                 uuids(&[&alice]),
+                Vec::new(),
             )
             .unwrap_err();
 
@@ -6212,6 +6446,7 @@ mod tests {
                     group_uuid.clone(),
                     expected_epoch,
                     uuids(&[&alice]),
+                    Vec::new(),
                 )
                 .unwrap_err();
 
@@ -6231,7 +6466,13 @@ mod tests {
         for message in not_for_rejoining {
             let error = bob_back
                 .client
-                .rejoin_group(message, group_uuid.clone(), epoch, uuids(&[&alice]))
+                .rejoin_group(
+                    message,
+                    group_uuid.clone(),
+                    epoch,
+                    uuids(&[&alice]),
+                    Vec::new(),
+                )
                 .unwrap_err();
 
             assert!(matches!(error, MlsError::InvalidMessage));
@@ -6283,6 +6524,7 @@ mod tests {
                     group_uuid,
                     group.current_epoch(),
                     others,
+                    Vec::new(),
                 )
                 .expect_err("a group past what a test lets it store must be refused");
 
@@ -6493,6 +6735,7 @@ mod tests {
                 group_uuid.clone(),
                 epoch,
                 uuids(&[&alice, &carol]),
+                Vec::new(),
             )
             .unwrap();
 
@@ -6509,6 +6752,7 @@ mod tests {
                 group_uuid.clone(),
                 epoch,
                 uuids(&[&alice, &carol]),
+                Vec::new(),
             )
             .unwrap();
 

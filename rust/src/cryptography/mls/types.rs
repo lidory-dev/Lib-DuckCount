@@ -46,6 +46,20 @@ pub struct AddMembersOutput {
     pub welcome: Vec<u8>,
 }
 
+/// A member of a group, as the host recorded them while it held the group:
+/// someone [`MlsClient::rejoin_group`] takes that group's GroupInfo from, under
+/// this key, when no pin says otherwise.
+///
+/// [`MlsClient::rejoin_group`]: crate::cryptography::mls::client::MlsClient::rejoin_group
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct VouchedMember {
+    /// UUID asserted by the member's credential.
+    pub user_uuid: String,
+    /// The member's MLS signature public key, as their leaf in the group held
+    /// it.
+    pub signature_key: Vec<u8>,
+}
+
 /// The result of rejoining a group from outside it, see
 /// [`MlsClient::rejoin_group`].
 ///
@@ -60,6 +74,11 @@ pub struct GroupRejoin {
     /// one this device holds, for every member of the group. It is a
     /// PublicMessage, as every Commit from outside a group is.
     pub commit: Vec<u8>,
+    /// Whether the GroupInfo's signer was this user or a member pinned on this
+    /// device, rather than one the host vouched for alone: the host hands the
+    /// group's older keys only to the former, as what it vouches for may be
+    /// out of date, a member removed since among it.
+    pub is_signer_pinned: bool,
     /// The epoch the Commit takes the group to, one past the one the
     /// GroupInfo it was built from is for: the one this device's state is in
     /// already.

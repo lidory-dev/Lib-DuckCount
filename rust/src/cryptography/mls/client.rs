@@ -32,7 +32,10 @@ use crate::cryptography::mls::{
         MlsStore, group_state::SealedGroupStateStorage, identity_pin::IdentityPinStore,
         key_package::SealedKeyPackageStorage, sealed_record::SealingKey,
     },
-    types::{GroupCreation, GroupRejoin, InviteeKeyPackage, KeyPackageBundle, WelcomeInspection},
+    types::{
+        GroupCreation, GroupRejoin, InviteeKeyPackage, KeyPackageBundle, VouchedMember,
+        WelcomeInspection,
+    },
 };
 
 /// The highest epoch a Welcome, or a GroupInfo a rejoin is built from, may
@@ -44,6 +47,25 @@ use crate::cryptography::mls::{
 /// Welcome and a GroupInfo are the only ways an epoch this device did not
 /// count up to itself reaches its state, and each is its author's to write.
 const MAX_JOINED_EPOCH: u64 = u32::MAX as u64;
+
+/// How this device came to take a GroupInfo from its signer, see
+/// [`MlsClient::rejoin_group`].
+enum SignerTrust {
+    /// This user, or a member under the key pinned for them.
+    Pinned,
+    /// A member nothing is pinned for, under the key the host holds for them.
+    Vouched,
+    /// Nobody this device takes one from.
+    None,
+}
+
+/// What [`MlsClient::rejoin_group`] checked its GroupInfo down to.
+struct RejoinedLeaf {
+    /// The index of the leaf this user holds in its tree.
+    own_index: u32,
+    /// See [`GroupRejoin::is_signer_pinned`].
+    is_signer_pinned: bool,
+}
 
 /// One user's MLS client.
 ///
@@ -715,6 +737,13 @@ impl MlsClient {
     /// * `expected_members` - The UUIDs of every member of the group other
     ///   than this user, as its tree holds them: the members the server
     ///   lists, and the departed ones whose removal nobody has committed yet.
+    /// * `vouched_members` - The members the host recorded for this group
+    ///   while it held it, each under the signature key its tree held for
+    ///   them: whom a GroupInfo is taken from besides those pinned, and, for
+    ///   whoever signed it, what every other leaf is held to. Of this group
+    ///   alone: a member can read their own group anyway, and being held to
+    ///   this, can add nothing to it by vouching for it but the members added
+    ///   since the host last recorded them.
     ///
     /// # Returns
     ///
@@ -733,9 +762,12 @@ impl MlsClient {
     /// * `MlsError::TooManyMembers` - If the tree holds more than
     ///   [`MAX_GROUP_MEMBERS`] members. Nothing is deleted.
     /// * `MlsError::UntrustedGroupInfo` - If the GroupInfo's signer is neither
-    ///   this user under their own signature key nor a member under the key
-    ///   pinned for them, or its signature does not hold. Nothing is deleted,
-    ///   and another member's GroupInfo may be taken.
+    ///   this user under their own signature key, nor a member under the key
+    ///   pinned for them, nor one no key is pinned for under the key
+    ///   `vouched_members` holds for them, or its signature does not hold, or
+    ///   a member no key is pinned for holds another key in its tree than the
+    ///   one `vouched_members` holds for them. Nothing is deleted, and another
+    ///   member's GroupInfo may be taken.
     /// * `MlsError::UnexpectedMembers` - If the tree's members are not this
     ///   user and exactly `expected_members`, or hold this user under another
     ///   signature key than this device's. Nothing is deleted.
@@ -754,18 +786,20 @@ impl MlsClient {
         expected_group_uuid: String,
         expected_epoch: u64,
         expected_members: Vec<String>,
+        vouched_members: Vec<VouchedMember>,
     ) -> Result<GroupRejoin, MlsError> {
         let client = self.client.lock().map_err(|_| MlsError::LockPoisoned)?;
 
         let group_info =
             MlsMessage::from_bytes(&group_info).map_err(|_| MlsError::InvalidMessage)?;
 
-        let own_index = self.rejoined_leaf(
+        let leaf = self.rejoined_leaf(
             &client,
             &group_info,
             &expected_group_uuid,
             expected_epoch,
             expected_members,
+            &vouched_members,
         )?;
 
         let group_id = server_group_id(&expected_group_uuid);
@@ -778,7 +812,7 @@ impl MlsClient {
         // with, whose lifetime may have ended long since.
         let (mut group, commit) = client
             .external_commit_builder()?
-            .with_removal(own_index)
+            .with_removal(leaf.own_index)
             .build(group_info)?;
 
         store(&mut group)?;
@@ -786,6 +820,7 @@ impl MlsClient {
         Ok(GroupRejoin {
             mls_group_id: group.group_id().to_vec(),
             commit: commit.to_bytes()?,
+            is_signer_pinned: leaf.is_signer_pinned,
             epoch: group.current_epoch(),
         })
     }
@@ -1058,9 +1093,9 @@ impl MlsClient {
             .delete_group(mls_group_id, openable_until, epoch)
     }
 
-    /// The index of the leaf this user holds in the tree `group_info`
-    /// carries, once it has passed every check
-    /// [`rejoin_group`](Self::rejoin_group) makes before it builds anything.
+    /// The leaf this user holds in the tree `group_info` carries, once it has
+    /// passed every check [`rejoin_group`](Self::rejoin_group) makes before it
+    /// builds anything.
     ///
     /// It changes nothing: the identity provider it checks the signer with
     /// only reads their pin.
@@ -1073,7 +1108,8 @@ impl MlsClient {
         expected_group_uuid: &str,
         expected_epoch: u64,
         mut expected_members: Vec<String>,
-    ) -> Result<u32, MlsError> {
+        vouched_members: &[VouchedMember],
+    ) -> Result<RejoinedLeaf, MlsError> {
         let info = group_info.as_group_info().ok_or(MlsError::InvalidMessage)?;
         let context = info.group_context();
 
@@ -1115,9 +1151,11 @@ impl MlsClient {
             .map_err(|_| MlsError::UntrustedGroupInfo)?
             .signing_identity;
 
-        if !self.trusts(&signer)? {
-            return Err(MlsError::UntrustedGroupInfo);
-        }
+        let is_signer_pinned = match self.trust_in(&signer, vouched_members)? {
+            SignerTrust::Pinned => true,
+            SignerTrust::Vouched => false,
+            SignerTrust::None => return Err(MlsError::UntrustedGroupInfo),
+        };
 
         client
             .validate_group_info(group_info, &signer)
@@ -1135,6 +1173,19 @@ impl MlsClient {
             if user_uuid == self.user_uuid {
                 own_leaf = Some(member);
             } else {
+                // The signer's word for the others goes no further than what
+                // the host recorded of them: it would otherwise be free to
+                // seat a key of its own under any of their UUIDs. A pin
+                // settles it instead, as the tree is checked against it next.
+                let is_refuted = vouched_members.iter().any(|vouched| {
+                    vouched.user_uuid == user_uuid
+                        && vouched.signature_key != member.signing_identity.signature_key.as_ref()
+                });
+
+                if is_refuted && self.pins.pinned_key(&user_uuid)?.is_none() {
+                    return Err(MlsError::UntrustedGroupInfo);
+                }
+
                 peers.push(user_uuid);
             }
         }
@@ -1151,32 +1202,59 @@ impl MlsClient {
         // The leaf the Commit removes, which members take only for a leaf
         // naming this user under the key the leaf the Commit seats holds,
         // this device's.
-        own_leaf
+        let own_index = own_leaf
             .filter(|member| {
                 member.signing_identity.signature_key == self.signature_key_pair.public
             })
             .map(|member| member.index)
-            .ok_or(MlsError::UnexpectedMembers)
+            .ok_or(MlsError::UnexpectedMembers)?;
+
+        Ok(RejoinedLeaf {
+            own_index,
+            is_signer_pinned,
+        })
     }
 
-    /// Whether `signer` is somebody this device takes a GroupInfo from: this
-    /// user under their own signature key, which only their devices hold, or
-    /// a member under the key pinned for them.
+    /// Whether, and why, `signer` is somebody this device takes a GroupInfo
+    /// from: this user under their own signature key, which only their devices
+    /// hold, a member under the key pinned for them, or one no key is pinned
+    /// for under the key `vouched_members` holds for them. A pin settles it
+    /// either way: a key the host recorded from a group's tree, which is its
+    /// creator's word, never stands against one pinned.
     ///
     /// # Errors
     ///
     /// * `MlsError::StorageFailed` - If the host storage fails.
     /// * `MlsError::StorageIntegrityFailed` - If a stored pin fails authentication.
-    fn trusts(&self, signer: &SigningIdentity) -> Result<bool, MlsError> {
+    fn trust_in(
+        &self,
+        signer: &SigningIdentity,
+        vouched_members: &[VouchedMember],
+    ) -> Result<SignerTrust, MlsError> {
         let Ok(user_uuid) = user_uuid_from(&signer.credential) else {
-            return Ok(false);
+            return Ok(SignerTrust::None);
         };
 
-        if user_uuid == self.user_uuid {
-            return Ok(signer.signature_key == self.signature_key_pair.public);
-        }
+        let is_settled = if user_uuid == self.user_uuid {
+            Some(signer.signature_key == self.signature_key_pair.public)
+        } else {
+            self.pins
+                .pinned_key(&user_uuid)?
+                .map(|pinned| pinned == signer.signature_key.as_ref())
+        };
 
-        Ok(self.pins.pinned_key(&user_uuid)?.as_deref() == Some(signer.signature_key.as_ref()))
+        Ok(match is_settled {
+            Some(true) => SignerTrust::Pinned,
+            Some(false) => SignerTrust::None,
+            None if vouched_members.iter().any(|member| {
+                member.user_uuid == user_uuid
+                    && member.signature_key == signer.signature_key.as_ref()
+            }) =>
+            {
+                SignerTrust::Vouched
+            }
+            None => SignerTrust::None,
+        })
     }
 
     /// [`MlsClient::prune_key_packages`], deleting the key packages that
